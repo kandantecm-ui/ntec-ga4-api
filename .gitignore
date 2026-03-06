@@ -1,0 +1,7 @@
+token.json
+client_secret.json
+oauth_client.json
+ngrok.exe
+__pycache__/
+*.pyc
+.env
