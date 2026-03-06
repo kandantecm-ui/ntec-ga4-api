@@ -1,37 +1,26 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import requests
-import json
 import os
 
 app = FastAPI()
 
 GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
-TOKEN_FILE = "token.json"
-
-
-def load_token():
-    with open(TOKEN_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_token(data):
-    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+GOOGLE_ACCESS_TOKEN = os.getenv("GOOGLE_ACCESS_TOKEN")
+GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
 
 def refresh_access_token():
-    token_data = load_token()
-
-    refresh_token = token_data["refresh_token"]
-    client_id = token_data["client_id"]
-    client_secret = token_data["client_secret"]
+    if not GOOGLE_REFRESH_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise Exception("Google OAuth environment variables are not set")
 
     url = "https://oauth2.googleapis.com/token"
     payload = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "refresh_token": refresh_token,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "refresh_token": GOOGLE_REFRESH_TOKEN,
         "grant_type": "refresh_token"
     }
 
@@ -40,19 +29,20 @@ def refresh_access_token():
     if r.status_code != 200:
         raise Exception(f"Token refresh failed: {r.text}")
 
-    new_token = r.json()["access_token"]
-    token_data["token"] = new_token
-    save_token(token_data)
-
-    return new_token
+    return r.json()["access_token"]
 
 
 def get_access_token():
-    token_data = load_token()
-    return token_data["token"]
+    if GOOGLE_ACCESS_TOKEN:
+        return GOOGLE_ACCESS_TOKEN
+
+    return refresh_access_token()
 
 
 def call_ga4(data):
+    if not GA4_PROPERTY_ID:
+        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
+
     access_token = get_access_token()
 
     headers = {
@@ -82,9 +72,6 @@ def health():
 
 @app.post("/api/ga4/standard/channel")
 def channel_report():
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {"startDate": "30daysAgo", "endDate": "today"}
@@ -103,9 +90,6 @@ def channel_report():
 
 @app.post("/api/ga4/page/flow")
 def page_flow():
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {"startDate": "30daysAgo", "endDate": "today"}
@@ -124,9 +108,6 @@ def page_flow():
 
 @app.post("/api/ga4/conversion/pages")
 def conversion_pages():
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {"startDate": "30daysAgo", "endDate": "today"}
@@ -153,9 +134,6 @@ def conversion_pages():
 
 @app.post("/api/ga4/conversion/path")
 def conversion_path():
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {"startDate": "30daysAgo", "endDate": "today"}
@@ -188,9 +166,6 @@ class ConversionSummaryRequest(BaseModel):
 
 @app.post("/api/ga4/conversion/summary")
 def conversion_summary(req: ConversionSummaryRequest):
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {
@@ -225,9 +200,6 @@ class ThanksPageSummaryRequest(BaseModel):
 
 @app.post("/api/ga4/conversion/thanks-summary")
 def thanks_summary(req: ThanksPageSummaryRequest):
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {
@@ -264,9 +236,6 @@ class PageFlowFromPageRequest(BaseModel):
 
 @app.post("/api/ga4/page/flow/from-page")
 def page_flow_from_page(req: PageFlowFromPageRequest):
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {
@@ -311,9 +280,6 @@ class ExitPagesRequest(BaseModel):
 
 @app.post("/api/ga4/page/exits")
 def page_exits(req: ExitPagesRequest):
-    if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
     body = {
         "dateRanges": [
             {
