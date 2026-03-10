@@ -125,6 +125,32 @@ def normalize_yyyymmdd(date_str: str) -> str:
     return date_str.replace("-", "")
 
 
+def build_bq_date_condition(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    field_name: str = "_TABLE_SUFFIX"
+):
+    conditions = []
+    params = []
+
+    if start_date:
+        conditions.append(f"{field_name} >= @startDate")
+        params.append(
+            bigquery.ScalarQueryParameter("startDate", "STRING", normalize_yyyymmdd(start_date))
+        )
+
+    if end_date:
+        conditions.append(f"{field_name} <= @endDate")
+        params.append(
+            bigquery.ScalarQueryParameter("endDate", "STRING", normalize_yyyymmdd(end_date))
+        )
+
+    if not conditions:
+        return "1=1", params
+
+    return " AND ".join(conditions), params
+
+
 # =============================
 # Utils
 # =============================
@@ -250,16 +276,16 @@ class ExitPagesRequest(BaseModel):
 
 class UsersByPageRequest(BaseModel):
     targetPage: str
-    startDate: str
-    endDate: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     limit: int = 20
     matchType: str = "contains"  # contains / exact
 
 
 class UserPathRequest(BaseModel):
     targetPage: str
-    startDate: str
-    endDate: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     limitUsers: int = 20
     stepsPerUser: int = 10
     matchType: str = "contains"  # contains / exact
@@ -267,16 +293,18 @@ class UserPathRequest(BaseModel):
 
 class UserJourneyRequest(BaseModel):
     userPseudoId: str
-    startDate: str
-    endDate: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     limit: int = 50
+
 
 class PrePagesBeforeTargetRequest(BaseModel):
     targetPage: str
-    startDate: str
-    endDate: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     limitUsers: int = 20
     stepsPerUser: int = 5
+    matchType: str = "contains"  # contains / exact
 
 
 # =============================
@@ -287,7 +315,7 @@ class PrePagesBeforeTargetRequest(BaseModel):
 def health():
     return {
         "status": "ok",
-        "version": "bq-fix-20260310-1"
+        "version": "bq-all-period-20260310-1"
     }
 
 
@@ -570,8 +598,30 @@ def page_exits(req: ExitPagesRequest):
 
 @app.post("/api/bq/page/users")
 def bq_users_by_page(req: UsersByPageRequest):
-    table_suffix_start = normalize_yyyymmdd(req.startDate)
-    table_suffix_end = normalize_yyyymmdd(req.endDate)
+    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+
+    if req.matchType == "exact":
+        page_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) = @targetPage
+        """
+        page_params = [
+            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+        ]
+    else:
+        page_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
+        """
+        page_params = [
+            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        ]
 
     sql = f"""
     SELECT
@@ -581,23 +631,16 @@ def bq_users_by_page(req: UsersByPageRequest):
       MAX(TIMESTAMP_MICROS(event_timestamp)) AS last_seen
     FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
     WHERE
-      _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+      {date_condition}
       AND event_name = 'page_view'
-      AND (
-        SELECT ep.value.string_value
-        FROM UNNEST(event_params) ep
-        WHERE ep.key = 'page_location'
-      ) LIKE @targetPageLike
+      AND {page_condition}
     GROUP BY user_pseudo_id
     ORDER BY page_views DESC, last_seen DESC
     LIMIT @limit
     """
 
-    params = [
-        bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
-        bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
-        bigquery.ScalarQueryParameter("limit", "INT64", req.limit),
-        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+    params = date_params + page_params + [
+        bigquery.ScalarQueryParameter("limit", "INT64", req.limit)
     ]
 
     rows = run_bq_query(sql, params)
@@ -621,21 +664,39 @@ def bq_users_by_page(req: UsersByPageRequest):
 
 @app.post("/api/bq/user/path")
 def bq_user_path(req: UserPathRequest):
-    table_suffix_start = normalize_yyyymmdd(req.startDate)
-    table_suffix_end = normalize_yyyymmdd(req.endDate)
+    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+
+    if req.matchType == "exact":
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) = @targetPage
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+        ]
+    else:
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        ]
 
     sql = f"""
     WITH target_users AS (
       SELECT DISTINCT user_pseudo_id
       FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
       WHERE
-        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+        {date_condition}
         AND event_name = 'page_view'
-        AND (
-          SELECT ep.value.string_value
-          FROM UNNEST(event_params) ep
-          WHERE ep.key = 'page_location'
-        ) LIKE @targetPageLike
+        AND {target_condition}
       LIMIT @limitUsers
     ),
     page_events AS (
@@ -661,7 +722,7 @@ def bq_user_path(req: UserPathRequest):
       INNER JOIN target_users tu
         ON e.user_pseudo_id = tu.user_pseudo_id
       WHERE
-        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
         AND e.event_name = 'page_view'
     ),
     ranked AS (
@@ -684,12 +745,9 @@ def bq_user_path(req: UserPathRequest):
     ORDER BY user_pseudo_id, event_time ASC
     """
 
-    params = [
-        bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
-        bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
+    params = date_params + target_params + [
         bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
-        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser),
-        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
     ]
 
     rows = run_bq_query(sql, params)
@@ -724,8 +782,7 @@ def bq_user_path(req: UserPathRequest):
 
 @app.post("/api/bq/user/journey")
 def bq_single_user_journey(req: UserJourneyRequest):
-    table_suffix_start = normalize_yyyymmdd(req.startDate)
-    table_suffix_end = normalize_yyyymmdd(req.endDate)
+    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
 
     sql = f"""
     SELECT
@@ -748,16 +805,14 @@ def bq_single_user_journey(req: UserJourneyRequest):
       ) AS page_title
     FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
     WHERE
-      _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+      {date_condition}
       AND event_name = 'page_view'
       AND user_pseudo_id = @userPseudoId
     ORDER BY event_time ASC
     LIMIT @limit
     """
 
-    params = [
-        bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
-        bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
+    params = date_params + [
         bigquery.ScalarQueryParameter("userPseudoId", "STRING", req.userPseudoId),
         bigquery.ScalarQueryParameter("limit", "INT64", req.limit),
     ]
@@ -777,23 +832,56 @@ def bq_single_user_journey(req: UserJourneyRequest):
         ]
     }
 
+
+# =============================
+# BigQuery: Pre Pages Before Target
+# =============================
+
 @app.post("/api/bq/page/pre-pages")
 def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
-    table_suffix_start = normalize_yyyymmdd(req.startDate)
-    table_suffix_end = normalize_yyyymmdd(req.endDate)
+    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
 
-    sql = f"""
-    WITH target_users AS (
-      SELECT DISTINCT user_pseudo_id
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
-      WHERE
-        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
-        AND event_name = 'page_view'
-        AND (
+    if req.matchType == "exact":
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) = @targetPage
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+        ]
+    else:
+        target_condition = """
+        (
           SELECT ep.value.string_value
           FROM UNNEST(event_params) ep
           WHERE ep.key = 'page_location'
         ) LIKE @targetPageLike
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        ]
+
+    sql = f"""
+    WITH target_hits AS (
+      SELECT
+        user_pseudo_id,
+        TIMESTAMP_MICROS(event_timestamp) AS target_time
+      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+      WHERE
+        {date_condition}
+        AND event_name = 'page_view'
+        AND {target_condition}
+    ),
+    target_users AS (
+      SELECT
+        user_pseudo_id,
+        MAX(target_time) AS latest_target_time
+      FROM target_hits
+      GROUP BY user_pseudo_id
+      ORDER BY latest_target_time DESC
       LIMIT @limitUsers
     ),
     page_events AS (
@@ -814,8 +902,9 @@ def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
       INNER JOIN target_users tu
         ON e.user_pseudo_id = tu.user_pseudo_id
       WHERE
-        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
         AND e.event_name = 'page_view'
+        AND TIMESTAMP_MICROS(e.event_timestamp) <= tu.latest_target_time
     ),
     ranked AS (
       SELECT
@@ -836,12 +925,9 @@ def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
     ORDER BY user_pseudo_id, event_time ASC
     """
 
-    params = [
-        bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
-        bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
+    params = date_params + target_params + [
         bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
-        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser),
-        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
     ]
 
     rows = run_bq_query(sql, params)
