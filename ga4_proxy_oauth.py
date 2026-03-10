@@ -322,7 +322,7 @@ class ConversionPrePagesRequest(BaseModel):
     limitUsers: int = Field(default=50, ge=1, le=100)
     stepsPerUser: int = Field(default=5, ge=1, le=10)
     matchType: str = "contains"
-    excludePages: list[str] = []
+    excludePages: Optional[list[str]] = []
 
 
 # =============================
@@ -639,25 +639,29 @@ def bq_users_by_page(req: UsersByPageRequest):
           WHERE ep.key = 'page_location'
         ) LIKE @targetPageLike
         """
-        page_params = [
-            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
-        ]
+       page_params = [
+    bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+]
 
-    sql = f"""
-    SELECT
-      user_pseudo_id,
-      COUNT(*) AS page_views,
-      MIN(TIMESTAMP_MICROS(event_timestamp)) AS first_seen,
-      MAX(TIMESTAMP_MICROS(event_timestamp)) AS last_seen
-    FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
-    WHERE
-      {date_condition}
-      AND event_name = 'page_view'
-      AND {page_condition}
-    GROUP BY user_pseudo_id
-    ORDER BY page_views DESC, last_seen DESC
-    LIMIT @limit
-    """
+exclude_condition = ""
+
+if req.excludePages:
+    conditions = [f"page_location LIKE '%{p}%'" for p in req.excludePages]
+    exclude_condition = "AND NOT (" + " OR ".join(conditions) + ")"
+
+sql = f"""
+SELECT
+  page_location,
+  page_title,
+  COUNT(*) AS appearance_count,
+  COUNT(DISTINCT user_pseudo_id) AS users_count
+FROM ranked
+WHERE rn_desc <= @stepsPerUser
+{exclude_condition}
+GROUP BY page_location, page_title
+ORDER BY users_count DESC, appearance_count DESC
+LIMIT 100
+"""
 
     params = date_params + page_params + [
         bigquery.ScalarQueryParameter("limit", "INT64", req.limit)
@@ -1066,6 +1070,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
         AND e.event_name = 'page_view'
         AND TIMESTAMP_MICROS(e.event_timestamp) < t.latest_target_time
         AND {exclude_target_condition}
+　　　　　　　{exclude_condition}
     ),
     ranked AS (
       SELECT
