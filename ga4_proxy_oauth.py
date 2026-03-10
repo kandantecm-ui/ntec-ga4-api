@@ -307,6 +307,15 @@ class PrePagesBeforeTargetRequest(BaseModel):
     matchType: str = "contains"  # contains / exact
 
 
+class ConversionPrePagesRequest(BaseModel):
+    targetPage: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    limitUsers: int = 50
+    stepsPerUser: int = 5
+    matchType: str = "contains"  # contains / exact
+
+
 # =============================
 # Health
 # =============================
@@ -315,7 +324,7 @@ class PrePagesBeforeTargetRequest(BaseModel):
 def health():
     return {
         "status": "ok",
-        "version": "bq-all-period-20260310-1"
+        "version": "bq-all-period-20260310-2"
     }
 
 
