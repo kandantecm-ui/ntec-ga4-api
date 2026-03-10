@@ -271,6 +271,13 @@ class UserJourneyRequest(BaseModel):
     endDate: str
     limit: int = 50
 
+class PrePagesBeforeTargetRequest(BaseModel):
+    targetPage: str
+    startDate: str
+    endDate: str
+    limitUsers: int = 20
+    stepsPerUser: int = 5
+
 
 # =============================
 # Health
@@ -767,5 +774,96 @@ def bq_single_user_journey(req: UserJourneyRequest):
                 "pageTitle": row["page_title"]
             }
             for row in rows
+        ]
+    }
+
+@app.post("/api/bq/page/pre-pages")
+def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
+    table_suffix_start = normalize_yyyymmdd(req.startDate)
+    table_suffix_end = normalize_yyyymmdd(req.endDate)
+
+    sql = f"""
+    WITH target_users AS (
+      SELECT DISTINCT user_pseudo_id
+      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+      WHERE
+        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+        AND event_name = 'page_view'
+        AND (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
+      LIMIT @limitUsers
+    ),
+    page_events AS (
+      SELECT
+        e.user_pseudo_id,
+        TIMESTAMP_MICROS(e.event_timestamp) AS event_time,
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) AS page_location,
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_title'
+        ) AS page_title
+      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
+      INNER JOIN target_users tu
+        ON e.user_pseudo_id = tu.user_pseudo_id
+      WHERE
+        _TABLE_SUFFIX BETWEEN @startDate AND @endDate
+        AND e.event_name = 'page_view'
+    ),
+    ranked AS (
+      SELECT
+        *,
+        ROW_NUMBER() OVER (
+          PARTITION BY user_pseudo_id
+          ORDER BY event_time DESC
+        ) AS rn_desc
+      FROM page_events
+    )
+    SELECT
+      user_pseudo_id,
+      event_time,
+      page_location,
+      page_title
+    FROM ranked
+    WHERE rn_desc <= @stepsPerUser
+    ORDER BY user_pseudo_id, event_time ASC
+    """
+
+    params = [
+        bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
+        bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
+        bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
+        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser),
+        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+    ]
+
+    rows = run_bq_query(sql, params)
+
+    grouped = {}
+    for row in rows:
+        user_id = row["user_pseudo_id"]
+        if user_id not in grouped:
+            grouped[user_id] = []
+
+        grouped[user_id].append({
+            "eventTime": row["event_time"].isoformat() if row["event_time"] else None,
+            "pageLocation": row["page_location"],
+            "pageTitle": row["page_title"]
+        })
+
+    return {
+        "rows": [
+            {
+                "userPseudoId": user_id,
+                "prePages": pages
+            }
+            for user_id, pages in grouped.items()
         ]
     }
