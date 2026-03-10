@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 import requests
 import os
@@ -46,8 +47,6 @@ def refresh_access_token():
 
 
 def get_access_token():
-    if GOOGLE_ACCESS_TOKEN:
-        return GOOGLE_ACCESS_TOKEN
     return refresh_access_token()
 
 
@@ -123,19 +122,13 @@ def run_bq_query(sql: str, params: list):
 
 
 # =============================
-# Search Console Core
+# Search Console Core (OAuth)
 # =============================
 
 def get_search_console_service():
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise HTTPException(status_code=500, detail="GOOGLE_SERVICE_ACCOUNT_JSON not set")
-
     try:
-        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        credentials = service_account.Credentials.from_service_account_info(
-            info,
-            scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
-        )
+        access_token = get_access_token()
+        credentials = Credentials(token=access_token)
         service = build("searchconsole", "v1", credentials=credentials)
         return service
     except Exception as e:
@@ -365,7 +358,7 @@ class SearchConsoleKeywordsRequest(BaseModel):
 def health():
     return {
         "status": "ok",
-        "version": "bq-all-period-20260310-5-search-console"
+        "version": "bq-all-period-20260310-6-search-console-oauth"
     }
 
 
@@ -1153,6 +1146,21 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
             for row in rows
         ]
     }
+
+
+# =============================
+# Search Console: Sites List
+# =============================
+
+@app.get("/api/search-console/sites")
+def search_console_sites():
+    service = get_search_console_service()
+
+    try:
+        response = service.sites().list().execute()
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search Console sites list failed: {str(e)}")
 
 
 # =============================
