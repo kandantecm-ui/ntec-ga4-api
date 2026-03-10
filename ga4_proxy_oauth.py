@@ -279,7 +279,8 @@ class UserJourneyRequest(BaseModel):
 @app.get("/health")
 def health():
     return {
-        "status": "ok"
+        "status": "ok",
+        "version": "bq-fix-20260310-1"
     }
 
 
