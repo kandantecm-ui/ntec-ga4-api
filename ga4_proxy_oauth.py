@@ -953,6 +953,8 @@ def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
             for user_id, pages in grouped.items()
         ]
     }
+
+
 # =============================
 # BigQuery: Conversion Pre Pages
 # =============================
@@ -972,6 +974,13 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
         target_params = [
             bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
         ]
+        exclude_target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) != @targetPage
+        """
     else:
         target_condition = """
         (
@@ -983,6 +992,13 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
         target_params = [
             bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
         ]
+        exclude_target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) NOT LIKE @targetPageLike
+        """
 
     sql = f"""
     WITH target_hits AS (
@@ -1025,6 +1041,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
         {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
         AND e.event_name = 'page_view'
         AND TIMESTAMP_MICROS(e.event_timestamp) < t.latest_target_time
+        AND {exclude_target_condition}
     ),
     ranked AS (
       SELECT
