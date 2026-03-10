@@ -953,3 +953,114 @@ def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
             for user_id, pages in grouped.items()
         ]
     }
+# =============================
+# BigQuery: Conversion Pre Pages
+# =============================
+
+@app.post("/api/bq/conversion/pre-pages")
+def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
+    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+
+    if req.matchType == "exact":
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) = @targetPage
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+        ]
+    else:
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
+        """
+        target_params = [
+            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+        ]
+
+    sql = f"""
+    WITH target_hits AS (
+      SELECT
+        user_pseudo_id,
+        TIMESTAMP_MICROS(event_timestamp) AS target_time
+      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+      WHERE
+        {date_condition}
+        AND event_name = 'page_view'
+        AND {target_condition}
+    ),
+    latest_target_per_user AS (
+      SELECT
+        user_pseudo_id,
+        MAX(target_time) AS latest_target_time
+      FROM target_hits
+      GROUP BY user_pseudo_id
+      ORDER BY latest_target_time DESC
+      LIMIT @limitUsers
+    ),
+    page_events AS (
+      SELECT
+        e.user_pseudo_id,
+        TIMESTAMP_MICROS(e.event_timestamp) AS event_time,
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) AS page_location,
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_title'
+        ) AS page_title
+      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
+      INNER JOIN latest_target_per_user t
+        ON e.user_pseudo_id = t.user_pseudo_id
+      WHERE
+        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
+        AND e.event_name = 'page_view'
+        AND TIMESTAMP_MICROS(e.event_timestamp) < t.latest_target_time
+    ),
+    ranked AS (
+      SELECT
+        *,
+        ROW_NUMBER() OVER (
+          PARTITION BY user_pseudo_id
+          ORDER BY event_time DESC
+        ) AS rn_desc
+      FROM page_events
+    )
+    SELECT
+      page_location,
+      page_title,
+      COUNT(*) AS appearance_count,
+      COUNT(DISTINCT user_pseudo_id) AS users_count
+    FROM ranked
+    WHERE rn_desc <= @stepsPerUser
+    GROUP BY page_location, page_title
+    ORDER BY users_count DESC, appearance_count DESC
+    """
+
+    params = date_params + target_params + [
+        bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
+        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
+    ]
+
+    rows = run_bq_query(sql, params)
+
+    return {
+        "rows": [
+            {
+                "pageLocation": row["page_location"],
+                "pageTitle": row["page_title"],
+                "appearanceCount": row["appearance_count"],
+                "usersCount": row["users_count"]
+            }
+            for row in rows
+        ]
+    }
