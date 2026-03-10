@@ -122,6 +122,26 @@ def run_bq_query(sql: str, params: list):
         raise HTTPException(status_code=500, detail=f"BigQuery query failed: {str(e)}")
 
 
+# =============================
+# Search Console Core
+# =============================
+
+def get_search_console_service():
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise HTTPException(status_code=500, detail="GOOGLE_SERVICE_ACCOUNT_JSON not set")
+
+    try:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/webmasters.readonly"]
+        )
+        service = build("searchconsole", "v1", credentials=credentials)
+        return service
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search Console service init failed: {str(e)}")
+
+
 def normalize_yyyymmdd(date_str: str) -> str:
     return date_str.replace("-", "")
 
@@ -327,6 +347,17 @@ class ConversionPrePagesRequest(BaseModel):
 
 
 # =============================
+# Search Console Request Models
+# =============================
+
+class SearchConsoleKeywordsRequest(BaseModel):
+    startDate: str
+    endDate: str
+    rowLimit: int = Field(default=100, ge=1, le=1000)
+    siteUrl: str = "sc-domain:ntecj.co.jp"
+
+
+# =============================
 # Health
 # =============================
 
@@ -334,7 +365,7 @@ class ConversionPrePagesRequest(BaseModel):
 def health():
     return {
         "status": "ok",
-        "version": "bq-all-period-20260310-4"
+        "version": "bq-all-period-20260310-5-search-console"
     }
 
 
@@ -1122,3 +1153,28 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
             for row in rows
         ]
     }
+
+
+# =============================
+# Search Console: Keywords
+# =============================
+
+@app.post("/api/search-console/keywords")
+def search_console_keywords(req: SearchConsoleKeywordsRequest):
+    service = get_search_console_service()
+
+    body = {
+        "startDate": req.startDate,
+        "endDate": req.endDate,
+        "dimensions": ["query", "page"],
+        "rowLimit": req.rowLimit
+    }
+
+    try:
+        response = service.searchanalytics().query(
+            siteUrl=req.siteUrl,
+            body=body
+        ).execute()
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search Console query failed: {str(e)}")
