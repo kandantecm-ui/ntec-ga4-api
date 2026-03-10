@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -175,6 +175,13 @@ def get_match_field(match_type: str = "url"):
     return "pageLocation"
 
 
+def get_ga4_match_type(match_type: str = "contains"):
+    match_type = (match_type or "contains").lower()
+    if match_type == "exact":
+        return "EXACT"
+    return "CONTAINS"
+
+
 def build_string_filter(field_name: str, value: str, match_type: str = "EXACT"):
     return {
         "filter": {
@@ -198,76 +205,77 @@ def build_limit(limit: int):
 class ChannelReportRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
-    limit: int = 20
+    days: int = Field(default=30, ge=1, le=365)
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class PageFlowRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     displayDimension: str = "pageTitle"
-    limit: int = 20
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class PageFlowFromPageRequest(BaseModel):
     sourcePage: str
-    matchType: str = "path"
+    matchType: str = "contains"  # contains / exact
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     displayDimension: str = "pageTitle"
-    limit: int = 20
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class PreviousPageRequest(BaseModel):
     targetPage: str
-    matchType: str = "url"
+    matchType: str = "url"  # url / path / title
+    filterMatchType: str = "contains"  # contains / exact
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     displayDimension: str = "pageTitle"
-    limit: int = 20
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 class ConversionPagesRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     eventName: str = "generate_lead"
     displayDimension: str = "pageTitle"
-    limit: int = 50
+    limit: int = Field(default=50, ge=1, le=100)
 
 
 class ConversionPathRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     eventName: str = "generate_lead"
     displayDimension: str = "pageTitle"
-    limit: int = 50
+    limit: int = Field(default=50, ge=1, le=100)
 
 
 class ConversionSummaryRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     eventName: str = "generate_lead"
 
 
 class ThanksPageSummaryRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     thanksPage: str = "/contact/thanks/"
 
 
 class ExitPagesRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = 30
+    days: int = Field(default=30, ge=1, le=365)
     displayDimension: str = "pageTitle"
-    limit: int = 20
+    limit: int = Field(default=20, ge=1, le=100)
 
 
 # =============================
@@ -278,7 +286,7 @@ class UsersByPageRequest(BaseModel):
     targetPage: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    limit: int = 20
+    limit: int = Field(default=20, ge=1, le=100)
     matchType: str = "contains"  # contains / exact
 
 
@@ -286,8 +294,8 @@ class UserPathRequest(BaseModel):
     targetPage: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    limitUsers: int = 20
-    stepsPerUser: int = 10
+    limitUsers: int = Field(default=20, ge=1, le=100)
+    stepsPerUser: int = Field(default=10, ge=1, le=20)
     matchType: str = "contains"  # contains / exact
 
 
@@ -295,15 +303,15 @@ class UserJourneyRequest(BaseModel):
     userPseudoId: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    limit: int = 50
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 class PrePagesBeforeTargetRequest(BaseModel):
     targetPage: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    limitUsers: int = 20
-    stepsPerUser: int = 5
+    limitUsers: int = Field(default=20, ge=1, le=100)
+    stepsPerUser: int = Field(default=5, ge=1, le=10)
     matchType: str = "contains"  # contains / exact
 
 
@@ -311,8 +319,8 @@ class ConversionPrePagesRequest(BaseModel):
     targetPage: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    limitUsers: int = 50
-    stepsPerUser: int = 5
+    limitUsers: int = Field(default=50, ge=1, le=100)
+    stepsPerUser: int = Field(default=5, ge=1, le=10)
     matchType: str = "contains"  # contains / exact
 
 
@@ -324,7 +332,7 @@ class ConversionPrePagesRequest(BaseModel):
 def health():
     return {
         "status": "ok",
-        "version": "bq-all-period-20260310-2"
+        "version": "bq-all-period-20260310-3"
     }
 
 
@@ -391,6 +399,7 @@ def page_flow(req: PageFlowRequest):
 @app.post("/api/ga4/page/flow/from-page")
 def page_flow_from_page(req: PageFlowFromPageRequest):
     display_dimension = get_display_dimension(req.displayDimension)
+    ga4_match_type = get_ga4_match_type(req.matchType)
 
     body = {
         "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
@@ -404,7 +413,7 @@ def page_flow_from_page(req: PageFlowFromPageRequest):
         "dimensionFilter": build_string_filter(
             field_name="pageReferrer",
             value=req.sourcePage,
-            match_type="CONTAINS"
+            match_type=ga4_match_type
         ),
         "orderBys": [
             {
@@ -426,6 +435,7 @@ def page_flow_from_page(req: PageFlowFromPageRequest):
 def previous_page(req: PreviousPageRequest):
     match_field = get_match_field(req.matchType)
     display_dimension = get_display_dimension(req.displayDimension)
+    ga4_match_type = get_ga4_match_type(req.filterMatchType)
 
     body = {
         "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
@@ -440,7 +450,7 @@ def previous_page(req: PreviousPageRequest):
         "dimensionFilter": build_string_filter(
             field_name=match_field,
             value=req.targetPage,
-            match_type="CONTAINS"
+            match_type=ga4_match_type
         ),
         "orderBys": [
             {
@@ -655,6 +665,7 @@ def bq_users_by_page(req: UsersByPageRequest):
     rows = run_bq_query(sql, params)
 
     return {
+        "count": len(rows),
         "rows": [
             {
                 "userPseudoId": row["user_pseudo_id"],
@@ -775,6 +786,7 @@ def bq_user_path(req: UserPathRequest):
         })
 
     return {
+        "count": len(grouped),
         "rows": [
             {
                 "userPseudoId": user_id,
@@ -829,6 +841,7 @@ def bq_single_user_journey(req: UserJourneyRequest):
     rows = run_bq_query(sql, params)
 
     return {
+        "count": len(rows),
         "rows": [
             {
                 "userPseudoId": row["user_pseudo_id"],
@@ -954,6 +967,7 @@ def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
         })
 
     return {
+        "count": len(grouped),
         "rows": [
             {
                 "userPseudoId": user_id,
@@ -1070,6 +1084,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
     WHERE rn_desc <= @stepsPerUser
     GROUP BY page_location, page_title
     ORDER BY users_count DESC, appearance_count DESC
+    LIMIT 100
     """
 
     params = date_params + target_params + [
@@ -1080,6 +1095,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
     rows = run_bq_query(sql, params)
 
     return {
+        "count": len(rows),
         "rows": [
             {
                 "pageLocation": row["page_location"],
