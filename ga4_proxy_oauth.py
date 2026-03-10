@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 from google.cloud import bigquery
 from google.oauth2 import service_account
 import requests
@@ -19,6 +20,10 @@ BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 
+# =============================
+# OAuth
+# =============================
+
 def refresh_access_token():
     if not GOOGLE_REFRESH_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise Exception("Google OAuth environment variables are not set")
@@ -31,7 +36,7 @@ def refresh_access_token():
         "grant_type": "refresh_token"
     }
 
-    r = requests.post(url, data=payload)
+    r = requests.post(url, data=payload, timeout=60)
 
     if r.status_code != 200:
         raise Exception(f"Token refresh failed: {r.text}")
@@ -42,11 +47,14 @@ def refresh_access_token():
 def get_access_token():
     if GOOGLE_ACCESS_TOKEN:
         return GOOGLE_ACCESS_TOKEN
-
     return refresh_access_token()
 
 
-def call_ga4(data):
+# =============================
+# GA4 Core
+# =============================
+
+def call_ga4(data: dict):
     if not GA4_PROPERTY_ID:
         raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
 
@@ -59,18 +67,22 @@ def call_ga4(data):
 
     url = f"https://analyticsdata.googleapis.com/v1beta/properties/{GA4_PROPERTY_ID}:runReport"
 
-    r = requests.post(url, headers=headers, json=data)
+    r = requests.post(url, headers=headers, json=data, timeout=120)
 
     if r.status_code == 401:
         access_token = refresh_access_token()
         headers["Authorization"] = f"Bearer {access_token}"
-        r = requests.post(url, headers=headers, json=data)
+        r = requests.post(url, headers=headers, json=data, timeout=120)
 
     if r.status_code != 200:
         raise HTTPException(status_code=r.status_code, detail=r.text)
 
     return r.json()
 
+
+# =============================
+# BigQuery Core
+# =============================
 
 def get_bq_client():
     if not BIGQUERY_PROJECT_ID:
@@ -91,7 +103,7 @@ def get_bq_client():
         raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {str(e)}")
 
 
-def run_bq_query(sql, params):
+def run_bq_query(sql: str, params: list):
     client = get_bq_client()
 
     job_config = bigquery.QueryJobConfig(
@@ -100,8 +112,12 @@ def run_bq_query(sql, params):
 
     try:
         query_job = client.query(sql, job_config=job_config)
-        return list(query_job.result())
+        rows = list(query_job.result())
+        return rows
     except Exception as e:
+        print("=== BIGQUERY ERROR START ===")
+        print(str(e))
+        print("=== BIGQUERY ERROR END ===")
         raise HTTPException(status_code=500, detail=f"BigQuery query failed: {str(e)}")
 
 
@@ -109,264 +125,128 @@ def normalize_yyyymmdd(date_str: str) -> str:
     return date_str.replace("-", "")
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+# =============================
+# Utils
+# =============================
+
+def build_date_ranges(start_date: Optional[str], end_date: Optional[str], days: int = 30):
+    if start_date and end_date:
+        return [{"startDate": start_date, "endDate": end_date}]
+    return [{"startDate": f"{days}daysAgo", "endDate": "today"}]
 
 
-@app.post("/api/ga4/standard/channel")
-def channel_report():
-    body = {
-        "dateRanges": [
-            {"startDate": "30daysAgo", "endDate": "today"}
-        ],
-        "dimensions": [
-            {"name": "sessionDefaultChannelGroup"}
-        ],
-        "metrics": [
-            {"name": "sessions"},
-            {"name": "totalUsers"}
-        ]
-    }
-
-    return call_ga4(body)
+def get_display_dimension(display_dimension: str = "pageTitle"):
+    if display_dimension == "pagePath":
+        return "pagePath"
+    return "pageTitle"
 
 
-@app.post("/api/ga4/page/flow")
-def page_flow():
-    body = {
-        "dateRanges": [
-            {"startDate": "30daysAgo", "endDate": "today"}
-        ],
-        "dimensions": [
-            {"name": "pageReferrer"},
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "screenPageViews"}
-        ]
-    }
-
-    return call_ga4(body)
+def get_match_field(match_type: str = "url"):
+    if match_type == "title":
+        return "pageTitle"
+    if match_type == "path":
+        return "pagePath"
+    return "pageLocation"
 
 
-@app.post("/api/ga4/conversion/pages")
-def conversion_pages():
-    body = {
-        "dateRanges": [
-            {"startDate": "30daysAgo", "endDate": "today"}
-        ],
-        "dimensions": [
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "sessions"}
-        ],
-        "dimensionFilter": {
-            "filter": {
-                "fieldName": "eventName",
-                "stringFilter": {
-                    "matchType": "EXACT",
-                    "value": "generate_lead"
-                }
+def build_string_filter(field_name: str, value: str, match_type: str = "EXACT"):
+    return {
+        "filter": {
+            "fieldName": field_name,
+            "stringFilter": {
+                "matchType": match_type,
+                "value": value
             }
         }
     }
 
-    return call_ga4(body)
+
+def build_limit(limit: int):
+    return str(limit)
 
 
-@app.post("/api/ga4/conversion/path")
-def conversion_path():
-    body = {
-        "dateRanges": [
-            {"startDate": "30daysAgo", "endDate": "today"}
-        ],
-        "dimensions": [
-            {"name": "landingPage"},
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "sessions"}
-        ],
-        "dimensionFilter": {
-            "filter": {
-                "fieldName": "eventName",
-                "stringFilter": {
-                    "matchType": "EXACT",
-                    "value": "generate_lead"
-                }
-            }
-        }
-    }
+# =============================
+# Common Request Models
+# =============================
 
-    return call_ga4(body)
-
-
-class ConversionSummaryRequest(BaseModel):
+class ChannelReportRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     days: int = 30
-    eventName: str = "generate_lead"
+    limit: int = 20
 
 
-@app.post("/api/ga4/conversion/summary")
-def conversion_summary(req: ConversionSummaryRequest):
-    body = {
-        "dateRanges": [
-            {
-                "startDate": f"{req.days}daysAgo",
-                "endDate": "today"
-            }
-        ],
-        "dimensions": [
-            {"name": "eventName"}
-        ],
-        "metrics": [
-            {"name": "eventCount"}
-        ],
-        "dimensionFilter": {
-            "filter": {
-                "fieldName": "eventName",
-                "stringFilter": {
-                    "matchType": "EXACT",
-                    "value": req.eventName
-                }
-            }
-        }
-    }
-
-    return call_ga4(body)
-
-
-class ThanksPageSummaryRequest(BaseModel):
+class PageFlowRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     days: int = 30
-    thanksPage: str = "/contact/thanks/"
-
-
-@app.post("/api/ga4/conversion/thanks-summary")
-def thanks_summary(req: ThanksPageSummaryRequest):
-    body = {
-        "dateRanges": [
-            {
-                "startDate": f"{req.days}daysAgo",
-                "endDate": "today"
-            }
-        ],
-        "dimensions": [
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "screenPageViews"},
-            {"name": "sessions"}
-        ],
-        "dimensionFilter": {
-            "filter": {
-                "fieldName": "pagePath",
-                "stringFilter": {
-                    "matchType": "EXACT",
-                    "value": req.thanksPage
-                }
-            }
-        }
-    }
-
-    return call_ga4(body)
+    displayDimension: str = "pageTitle"
+    limit: int = 20
 
 
 class PageFlowFromPageRequest(BaseModel):
     sourcePage: str
+    matchType: str = "path"
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     days: int = 30
+    displayDimension: str = "pageTitle"
     limit: int = 20
 
 
-@app.post("/api/ga4/page/flow/from-page")
-def page_flow_from_page(req: PageFlowFromPageRequest):
-    body = {
-        "dateRanges": [
-            {
-                "startDate": f"{req.days}daysAgo",
-                "endDate": "today"
-            }
-        ],
-        "dimensions": [
-            {"name": "pageReferrer"},
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "screenPageViews"}
-        ],
-        "dimensionFilter": {
-            "filter": {
-                "fieldName": "pageReferrer",
-                "stringFilter": {
-                    "matchType": "CONTAINS",
-                    "value": req.sourcePage
-                }
-            }
-        },
-        "orderBys": [
-            {
-                "metric": {
-                    "metricName": "screenPageViews"
-                },
-                "desc": True
-            }
-        ],
-        "limit": str(req.limit)
-    }
+class PreviousPageRequest(BaseModel):
+    targetPage: str
+    matchType: str = "url"
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = 30
+    displayDimension: str = "pageTitle"
+    limit: int = 20
 
-    return call_ga4(body)
+
+class ConversionPagesRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = 30
+    eventName: str = "generate_lead"
+    displayDimension: str = "pageTitle"
+    limit: int = 50
+
+
+class ConversionPathRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = 30
+    eventName: str = "generate_lead"
+    displayDimension: str = "pageTitle"
+    limit: int = 50
+
+
+class ConversionSummaryRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = 30
+    eventName: str = "generate_lead"
+
+
+class ThanksPageSummaryRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = 30
+    thanksPage: str = "/contact/thanks/"
 
 
 class ExitPagesRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
     days: int = 30
+    displayDimension: str = "pageTitle"
     limit: int = 20
 
 
-@app.post("/api/ga4/page/exits")
-def page_exits(req: ExitPagesRequest):
-    body = {
-        "dateRanges": [
-            {
-                "startDate": f"{req.days}daysAgo",
-                "endDate": "today"
-            }
-        ],
-        "dimensions": [
-            {"name": "pagePath"}
-        ],
-        "metrics": [
-            {"name": "sessions"},
-            {"name": "screenPageViews"},
-            {"name": "bounceRate"}
-        ],
-        "metricFilter": {
-            "filter": {
-                "fieldName": "sessions",
-                "numericFilter": {
-                    "operation": "GREATER_THAN",
-                    "value": {
-                        "int64Value": "10"
-                    }
-                }
-            }
-        },
-        "orderBys": [
-            {
-                "metric": {
-                    "metricName": "bounceRate"
-                },
-                "desc": True
-            }
-        ],
-        "limit": str(req.limit)
-    }
-
-    return call_ga4(body)
-
-
-# -----------------------------
-# BigQuery: User Tracking
-# -----------------------------
+# =============================
+# BigQuery Request Models
+# =============================
 
 class UsersByPageRequest(BaseModel):
     targetPage: str
@@ -392,12 +272,298 @@ class UserJourneyRequest(BaseModel):
     limit: int = 50
 
 
+# =============================
+# Health
+# =============================
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok"
+    }
+
+
+# =============================
+# Channel Report
+# =============================
+
+@app.post("/api/ga4/standard/channel")
+def channel_report(req: ChannelReportRequest):
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "sessionDefaultChannelGroup"}
+        ],
+        "metrics": [
+            {"name": "sessions"},
+            {"name": "totalUsers"}
+        ],
+        "orderBys": [
+            {
+                "metric": {"metricName": "sessions"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Page Flow (All)
+# =============================
+
+@app.post("/api/ga4/page/flow")
+def page_flow(req: PageFlowRequest):
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "pageReferrer"},
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "screenPageViews"}
+        ],
+        "orderBys": [
+            {
+                "metric": {"metricName": "screenPageViews"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Page Flow From Specific Page
+# =============================
+
+@app.post("/api/ga4/page/flow/from-page")
+def page_flow_from_page(req: PageFlowFromPageRequest):
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "pageReferrer"},
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "screenPageViews"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name="pageReferrer",
+            value=req.sourcePage,
+            match_type="CONTAINS"
+        ),
+        "orderBys": [
+            {
+                "metric": {"metricName": "screenPageViews"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Previous Pages Before Target Page
+# =============================
+
+@app.post("/api/ga4/page/before-page")
+def previous_page(req: PreviousPageRequest):
+    match_field = get_match_field(req.matchType)
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "pageReferrer"},
+            {"name": match_field},
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "screenPageViews"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name=match_field,
+            value=req.targetPage,
+            match_type="CONTAINS"
+        ),
+        "orderBys": [
+            {
+                "metric": {"metricName": "screenPageViews"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Conversion Pages
+# =============================
+
+@app.post("/api/ga4/conversion/pages")
+def conversion_pages(req: ConversionPagesRequest):
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "eventName"},
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "eventCount"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name="eventName",
+            value=req.eventName,
+            match_type="EXACT"
+        ),
+        "orderBys": [
+            {
+                "metric": {"metricName": "eventCount"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Conversion Path
+# =============================
+
+@app.post("/api/ga4/conversion/path")
+def conversion_path(req: ConversionPathRequest):
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "landingPage"},
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "eventCount"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name="eventName",
+            value=req.eventName,
+            match_type="EXACT"
+        ),
+        "orderBys": [
+            {
+                "metric": {"metricName": "eventCount"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Conversion Summary
+# =============================
+
+@app.post("/api/ga4/conversion/summary")
+def conversion_summary(req: ConversionSummaryRequest):
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "eventName"}
+        ],
+        "metrics": [
+            {"name": "eventCount"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name="eventName",
+            value=req.eventName,
+            match_type="EXACT"
+        )
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Thanks Page Summary
+# =============================
+
+@app.post("/api/ga4/conversion/thanks-summary")
+def thanks_summary(req: ThanksPageSummaryRequest):
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": "pagePath"}
+        ],
+        "metrics": [
+            {"name": "screenPageViews"},
+            {"name": "sessions"}
+        ],
+        "dimensionFilter": build_string_filter(
+            field_name="pagePath",
+            value=req.thanksPage,
+            match_type="EXACT"
+        )
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# Exit Pages
+# =============================
+
+@app.post("/api/ga4/page/exits")
+def page_exits(req: ExitPagesRequest):
+    display_dimension = get_display_dimension(req.displayDimension)
+
+    body = {
+        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dimensions": [
+            {"name": display_dimension}
+        ],
+        "metrics": [
+            {"name": "sessions"},
+            {"name": "screenPageViews"},
+            {"name": "bounceRate"}
+        ],
+        "orderBys": [
+            {
+                "metric": {"metricName": "bounceRate"},
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+
+# =============================
+# BigQuery: Users by Page
+# =============================
+
 @app.post("/api/bq/page/users")
 def bq_users_by_page(req: UsersByPageRequest):
     table_suffix_start = normalize_yyyymmdd(req.startDate)
     table_suffix_end = normalize_yyyymmdd(req.endDate)
-
-    where_clause = "page_location = @targetPage" if req.matchType == "exact" else "page_location LIKE @targetPageLike"
 
     sql = f"""
     SELECT
@@ -409,7 +575,11 @@ def bq_users_by_page(req: UsersByPageRequest):
     WHERE
       _TABLE_SUFFIX BETWEEN @startDate AND @endDate
       AND event_name = 'page_view'
-      AND {where_clause}
+      AND (
+        SELECT ep.value.string_value
+        FROM UNNEST(event_params) ep
+        WHERE ep.key = 'page_location'
+      ) LIKE @targetPageLike
     GROUP BY user_pseudo_id
     ORDER BY page_views DESC, last_seen DESC
     LIMIT @limit
@@ -419,12 +589,8 @@ def bq_users_by_page(req: UsersByPageRequest):
         bigquery.ScalarQueryParameter("startDate", "STRING", table_suffix_start),
         bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
         bigquery.ScalarQueryParameter("limit", "INT64", req.limit),
+        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
     ]
-
-    if req.matchType == "exact":
-        params.append(bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage))
-    else:
-        params.append(bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%"))
 
     rows = run_bq_query(sql, params)
 
@@ -441,12 +607,14 @@ def bq_users_by_page(req: UsersByPageRequest):
     }
 
 
+# =============================
+# BigQuery: User Paths by Target Page
+# =============================
+
 @app.post("/api/bq/user/path")
 def bq_user_path(req: UserPathRequest):
     table_suffix_start = normalize_yyyymmdd(req.startDate)
     table_suffix_end = normalize_yyyymmdd(req.endDate)
-
-    where_clause = "page_location = @targetPage" if req.matchType == "exact" else "page_location LIKE @targetPageLike"
 
     sql = f"""
     WITH target_users AS (
@@ -455,7 +623,11 @@ def bq_user_path(req: UserPathRequest):
       WHERE
         _TABLE_SUFFIX BETWEEN @startDate AND @endDate
         AND event_name = 'page_view'
-        AND {where_clause}
+        AND (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
       LIMIT @limitUsers
     ),
     page_events AS (
@@ -509,12 +681,8 @@ def bq_user_path(req: UserPathRequest):
         bigquery.ScalarQueryParameter("endDate", "STRING", table_suffix_end),
         bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
         bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser),
+        bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
     ]
-
-    if req.matchType == "exact":
-        params.append(bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage))
-    else:
-        params.append(bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%"))
 
     rows = run_bq_query(sql, params)
 
@@ -541,6 +709,10 @@ def bq_user_path(req: UserPathRequest):
         ]
     }
 
+
+# =============================
+# BigQuery: Single User Journey
+# =============================
 
 @app.post("/api/bq/user/journey")
 def bq_single_user_journey(req: UserJourneyRequest):
