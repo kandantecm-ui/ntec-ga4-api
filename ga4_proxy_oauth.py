@@ -321,7 +321,8 @@ class ConversionPrePagesRequest(BaseModel):
     endDate: Optional[str] = None
     limitUsers: int = Field(default=50, ge=1, le=100)
     stepsPerUser: int = Field(default=5, ge=1, le=10)
-    matchType: str = "contains"  # contains / exact
+    matchType: str = "contains"
+    excludePages: list[str] = []
 
 
 # =============================
