@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from googleapiclient.discovery import build
 import requests
 import os
 import json
