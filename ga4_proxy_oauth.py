@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
+
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
@@ -101,6 +102,9 @@ def get_bq_client():
         return client
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {str(e)}")
+        except Exception as e:
+    print("SEARCH CONSOLE ERROR:", str(e))
+    raise HTTPException(status_code=500, detail=str(e))
 
 
 def run_bq_query(sql: str, params: list):
