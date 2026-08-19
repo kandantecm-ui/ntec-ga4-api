@@ -1,18 +1,29 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+
 import requests
 import os
 import json
 
-app = FastAPI()
+
+app = FastAPI(
+    title="NTEC Analytics API",
+    version="2026.08.19"
+)
+
+
+# =========================================================
+# Environment Variables
+# =========================================================
 
 GA4_PROPERTY_ID = os.getenv("GA4_PROPERTY_ID")
+
 GOOGLE_ACCESS_TOKEN = os.getenv("GOOGLE_ACCESS_TOKEN")
 GOOGLE_REFRESH_TOKEN = os.getenv("GOOGLE_REFRESH_TOKEN")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -23,15 +34,31 @@ BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 
-# =============================
+# =========================================================
 # OAuth
-# =============================
+# =========================================================
 
 def refresh_access_token():
-    if not GOOGLE_REFRESH_TOKEN or not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-        raise Exception("Google OAuth environment variables are not set")
+    if not GOOGLE_REFRESH_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_REFRESH_TOKEN not set"
+        )
+
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_CLIENT_ID not set"
+        )
+
+    if not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_CLIENT_SECRET not set"
+        )
 
     url = "https://oauth2.googleapis.com/token"
+
     payload = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
@@ -39,75 +66,225 @@ def refresh_access_token():
         "grant_type": "refresh_token"
     }
 
-    r = requests.post(url, data=payload, timeout=60)
+    try:
+        response = requests.post(
+            url,
+            data=payload,
+            timeout=60
+        )
+    except requests.RequestException as e:
+        print("=== GOOGLE TOKEN REQUEST ERROR ===")
+        print(str(e))
 
-    if r.status_code != 200:
-        raise Exception(f"Token refresh failed: {r.text}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google OAuth request failed: {str(e)}"
+        )
 
-    return r.json()["access_token"]
+    if response.status_code != 200:
+        print("=== GOOGLE TOKEN REFRESH ERROR ===")
+        print("status:", response.status_code)
+        print("body:", response.text)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Token refresh failed: {response.text}"
+        )
+
+    try:
+        data = response.json()
+        access_token = data["access_token"]
+        return access_token
+
+    except Exception as e:
+        print("=== GOOGLE TOKEN PARSE ERROR ===")
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Access token parse failed: {str(e)}"
+        )
 
 
 def get_access_token():
-    return refresh_access_token()
+    # Refresh Token方式を優先
+    if (
+        GOOGLE_REFRESH_TOKEN
+        and GOOGLE_CLIENT_ID
+        and GOOGLE_CLIENT_SECRET
+    ):
+        return refresh_access_token()
+
+    # 一時的なAccess Tokenが設定されている場合
+    if GOOGLE_ACCESS_TOKEN:
+        return GOOGLE_ACCESS_TOKEN
+
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "Google OAuth credentials not set. "
+            "Set GOOGLE_REFRESH_TOKEN, GOOGLE_CLIENT_ID, "
+            "GOOGLE_CLIENT_SECRET or GOOGLE_ACCESS_TOKEN."
+        )
+    )
 
 
-# =============================
+# =========================================================
 # GA4 Core
-# =============================
+# =========================================================
 
 def call_ga4(data: dict):
+
     if not GA4_PROPERTY_ID:
-        raise HTTPException(status_code=500, detail="GA4_PROPERTY_ID not set")
-
-    access_token = get_access_token()
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-
-    url = f"https://analyticsdata.googleapis.com/v1beta/properties/{GA4_PROPERTY_ID}:runReport"
-
-    r = requests.post(url, headers=headers, json=data, timeout=120)
-
-    if r.status_code == 401:
-        access_token = refresh_access_token()
-        headers["Authorization"] = f"Bearer {access_token}"
-        r = requests.post(url, headers=headers, json=data, timeout=120)
-
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-
-    return r.json()
-
-
-# =============================
-# BigQuery Core
-# =============================
-
-def get_bq_client():
-    if not BIGQUERY_PROJECT_ID:
-        raise HTTPException(status_code=500, detail="BIGQUERY_PROJECT_ID not set")
-
-    if not BIGQUERY_DATASET:
-        raise HTTPException(status_code=500, detail="BIGQUERY_DATASET not set")
-
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        raise HTTPException(status_code=500, detail="GOOGLE_SERVICE_ACCOUNT_JSON not set")
+        raise HTTPException(
+            status_code=500,
+            detail="GA4_PROPERTY_ID not set"
+        )
 
     try:
-        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        credentials = service_account.Credentials.from_service_account_info(info)
-        client = bigquery.Client(project=BIGQUERY_PROJECT_ID, credentials=credentials)
-        return client
+        access_token = get_access_token()
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+        url = (
+            "https://analyticsdata.googleapis.com/v1beta/"
+            f"properties/{GA4_PROPERTY_ID}:runReport"
+        )
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json=data,
+            timeout=120
+        )
+
+        # Access Token期限切れ等の場合、Refresh Tokenがあれば再試行
+        if (
+            response.status_code == 401
+            and GOOGLE_REFRESH_TOKEN
+            and GOOGLE_CLIENT_ID
+            and GOOGLE_CLIENT_SECRET
+        ):
+            access_token = refresh_access_token()
+
+            headers["Authorization"] = (
+                f"Bearer {access_token}"
+            )
+
+            response = requests.post(
+                url,
+                headers=headers,
+                json=data,
+                timeout=120
+            )
+
+        if response.status_code != 200:
+
+            print("=== GA4 API ERROR START ===")
+            print("status:", response.status_code)
+            print("property:", GA4_PROPERTY_ID)
+            print("request:", json.dumps(data, ensure_ascii=False))
+            print("response:", response.text)
+            print("=== GA4 API ERROR END ===")
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail={
+                    "error": "GA4_API_ERROR",
+                    "status": response.status_code,
+                    "message": response.text
+                }
+            )
+
+        return response.json()
+
+    except HTTPException:
+        raise
+
+    except requests.RequestException as e:
+
+        print("=== GA4 NETWORK ERROR ===")
+        print(str(e))
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"GA4 request failed: {str(e)}"
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"BigQuery client init failed: {str(e)}")
-        except Exception as e:
-    print("SEARCH CONSOLE ERROR:", str(e))
-    raise HTTPException(status_code=500, detail=str(e))
+
+        print("=== GA4 UNEXPECTED ERROR ===")
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"GA4 unexpected error: {str(e)}"
+        )
+
+
+# =========================================================
+# BigQuery Core
+# =========================================================
+
+def get_bq_client():
+
+    if not BIGQUERY_PROJECT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="BIGQUERY_PROJECT_ID not set"
+        )
+
+    if not BIGQUERY_DATASET:
+        raise HTTPException(
+            status_code=500,
+            detail="BIGQUERY_DATASET not set"
+        )
+
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_SERVICE_ACCOUNT_JSON not set"
+        )
+
+    try:
+        info = json.loads(
+            GOOGLE_SERVICE_ACCOUNT_JSON
+        )
+
+        credentials = (
+            service_account
+            .Credentials
+            .from_service_account_info(info)
+        )
+
+        client = bigquery.Client(
+            project=BIGQUERY_PROJECT_ID,
+            credentials=credentials
+        )
+
+        return client
+
+    except Exception as e:
+
+        print("=== BIGQUERY CLIENT ERROR ===")
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "BigQuery client init failed: "
+                f"{str(e)}"
+            )
+        )
 
 
 def run_bq_query(sql: str, params: list):
+
     client = get_bq_client()
 
     job_config = bigquery.QueryJobConfig(
@@ -115,32 +292,90 @@ def run_bq_query(sql: str, params: list):
     )
 
     try:
-        query_job = client.query(sql, job_config=job_config)
-        rows = list(query_job.result())
+        query_job = client.query(
+            sql,
+            job_config=job_config
+        )
+
+        rows = list(
+            query_job.result()
+        )
+
         return rows
+
     except Exception as e:
-        print("=== BIGQUERY ERROR START ===")
+
+        print("=== BIGQUERY QUERY ERROR START ===")
+        print(type(e).__name__)
         print(str(e))
-        print("=== BIGQUERY ERROR END ===")
-        raise HTTPException(status_code=500, detail=f"BigQuery query failed: {str(e)}")
+        print("=== BIGQUERY QUERY ERROR END ===")
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"BigQuery query failed: {str(e)}"
+        )
 
 
-# =============================
-# Search Console Core (OAuth)
-# =============================
+# =========================================================
+# Search Console Core
+# =========================================================
 
 def get_search_console_service():
+
     try:
         access_token = get_access_token()
-        credentials = Credentials(token=access_token)
-        service = build("searchconsole", "v1", credentials=credentials)
-        return service
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search Console service init failed: {str(e)}")
 
+        credentials = Credentials(
+            token=access_token
+        )
+
+        service = build(
+            "searchconsole",
+            "v1",
+            credentials=credentials,
+            cache_discovery=False
+        )
+
+        return service
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print("=== SEARCH CONSOLE INIT ERROR ===")
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Search Console service init failed: "
+                f"{str(e)}"
+            )
+        )
+
+
+# =========================================================
+# Utils
+# =========================================================
 
 def normalize_yyyymmdd(date_str: str) -> str:
     return date_str.replace("-", "")
+
+
+def validate_ga4_date_pair(
+    start_date: Optional[str],
+    end_date: Optional[str]
+):
+    if bool(start_date) != bool(end_date):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "startDate and endDate must be "
+                "specified together"
+            )
+        )
 
 
 def build_bq_date_condition(
@@ -152,15 +387,29 @@ def build_bq_date_condition(
     params = []
 
     if start_date:
-        conditions.append(f"{field_name} >= @startDate")
+        conditions.append(
+            f"{field_name} >= @startDate"
+        )
+
         params.append(
-            bigquery.ScalarQueryParameter("startDate", "STRING", normalize_yyyymmdd(start_date))
+            bigquery.ScalarQueryParameter(
+                "startDate",
+                "STRING",
+                normalize_yyyymmdd(start_date)
+            )
         )
 
     if end_date:
-        conditions.append(f"{field_name} <= @endDate")
+        conditions.append(
+            f"{field_name} <= @endDate"
+        )
+
         params.append(
-            bigquery.ScalarQueryParameter("endDate", "STRING", normalize_yyyymmdd(end_date))
+            bigquery.ScalarQueryParameter(
+                "endDate",
+                "STRING",
+                normalize_yyyymmdd(end_date)
+            )
         )
 
     if not conditions:
@@ -169,38 +418,69 @@ def build_bq_date_condition(
     return " AND ".join(conditions), params
 
 
-# =============================
-# Utils
-# =============================
+def build_date_ranges(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    days: int = 30
+):
+    validate_ga4_date_pair(
+        start_date,
+        end_date
+    )
 
-def build_date_ranges(start_date: Optional[str], end_date: Optional[str], days: int = 30):
     if start_date and end_date:
-        return [{"startDate": start_date, "endDate": end_date}]
-    return [{"startDate": f"{days}daysAgo", "endDate": "today"}]
+        return [
+            {
+                "startDate": start_date,
+                "endDate": end_date
+            }
+        ]
+
+    return [
+        {
+            "startDate": f"{days}daysAgo",
+            "endDate": "today"
+        }
+    ]
 
 
-def get_display_dimension(display_dimension: str = "pageTitle"):
+def get_display_dimension(
+    display_dimension: str = "pageTitle"
+):
     if display_dimension == "pagePath":
         return "pagePath"
+
     return "pageTitle"
 
 
-def get_match_field(match_type: str = "url"):
+def get_match_field(
+    match_type: str = "url"
+):
     if match_type == "title":
         return "pageTitle"
+
     if match_type == "path":
         return "pagePath"
+
     return "pageLocation"
 
 
-def get_ga4_match_type(match_type: str = "contains"):
-    match_type = (match_type or "contains").lower()
-    if match_type == "exact":
+def get_ga4_match_type(
+    match_type: str = "contains"
+):
+    if (
+        match_type or "contains"
+    ).lower() == "exact":
         return "EXACT"
+
     return "CONTAINS"
 
 
-def build_string_filter(field_name: str, value: str, match_type: str = "EXACT"):
+def build_string_filter(
+    field_name: str,
+    value: str,
+    match_type: str = "EXACT"
+):
     return {
         "filter": {
             "fieldName": field_name,
@@ -216,43 +496,111 @@ def build_limit(limit: int):
     return str(limit)
 
 
-# =============================
-# Common Request Models
-# =============================
+def build_bq_exclude_conditions(
+    exclude_pages: list[str],
+    alias: str = "e"
+):
+    if not exclude_pages:
+        return "", []
+
+    conditions = []
+    params = []
+
+    for index, page in enumerate(
+        exclude_pages
+    ):
+        param_name = (
+            f"excludePage{index}"
+        )
+
+        conditions.append(
+            f"""
+            (
+              SELECT ep.value.string_value
+              FROM UNNEST({alias}.event_params) ep
+              WHERE ep.key = 'page_location'
+            ) NOT LIKE @{param_name}
+            """
+        )
+
+        params.append(
+            bigquery.ScalarQueryParameter(
+                param_name,
+                "STRING",
+                f"%{page}%"
+            )
+        )
+
+    return (
+        " AND " + " AND ".join(conditions),
+        params
+    )
+
+
+# =========================================================
+# Request Models
+# =========================================================
 
 class ChannelReportRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
-    days: int = Field(default=30, ge=1, le=365)
-    limit: int = Field(default=20, ge=1, le=100)
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365
+    )
+    limit: int = Field(
+        default=20,
+        ge=1,
+        le=100
+    )
 
 
 class PageFlowRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=20, ge=1, le=100)
 
 
 class PageFlowFromPageRequest(BaseModel):
     sourcePage: str
-    matchType: str = "contains"
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=20, ge=1, le=100)
 
 
 class PreviousPageRequest(BaseModel):
     targetPage: str
-    matchType: str = "url"
-    filterMatchType: str = "contains"
+    matchType: Literal[
+        "url",
+        "title",
+        "path"
+    ] = "url"
+    filterMatchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -261,7 +609,10 @@ class ConversionPagesRequest(BaseModel):
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
     eventName: str = "generate_lead"
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=50, ge=1, le=100)
 
 
@@ -270,7 +621,10 @@ class ConversionPathRequest(BaseModel):
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
     eventName: str = "generate_lead"
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=50, ge=1, le=100)
 
 
@@ -292,20 +646,26 @@ class ExitPagesRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     days: int = Field(default=30, ge=1, le=365)
-    displayDimension: str = "pageTitle"
+    displayDimension: Literal[
+        "pageTitle",
+        "pagePath"
+    ] = "pageTitle"
     limit: int = Field(default=20, ge=1, le=100)
 
 
-# =============================
+# =========================================================
 # BigQuery Request Models
-# =============================
+# =========================================================
 
 class UsersByPageRequest(BaseModel):
     targetPage: str
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     limit: int = Field(default=20, ge=1, le=100)
-    matchType: str = "contains"
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
 
 
 class UserPathRequest(BaseModel):
@@ -314,7 +674,10 @@ class UserPathRequest(BaseModel):
     endDate: Optional[str] = None
     limitUsers: int = Field(default=20, ge=1, le=100)
     stepsPerUser: int = Field(default=10, ge=1, le=20)
-    matchType: str = "contains"
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
 
 
 class UserJourneyRequest(BaseModel):
@@ -330,7 +693,10 @@ class PrePagesBeforeTargetRequest(BaseModel):
     endDate: Optional[str] = None
     limitUsers: int = Field(default=20, ge=1, le=100)
     stepsPerUser: int = Field(default=5, ge=1, le=10)
-    matchType: str = "contains"
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
 
 
 class ConversionPrePagesRequest(BaseModel):
@@ -339,51 +705,84 @@ class ConversionPrePagesRequest(BaseModel):
     endDate: Optional[str] = None
     limitUsers: int = Field(default=50, ge=1, le=100)
     stepsPerUser: int = Field(default=5, ge=1, le=10)
-    matchType: str = "contains"
-    excludePages: Optional[list[str]] = []
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
+
+    excludePages: list[str] = Field(
+        default_factory=list
+    )
 
 
-# =============================
+# =========================================================
 # Search Console Request Models
-# =============================
+# =========================================================
 
 class SearchConsoleKeywordsRequest(BaseModel):
     startDate: str
     endDate: str
-    rowLimit: int = Field(default=100, ge=1, le=1000)
+    rowLimit: int = Field(
+        default=100,
+        ge=1,
+        le=1000
+    )
     siteUrl: str = "sc-domain:ntecj.co.jp"
 
 
-# =============================
-# Health
-# =============================
+# =========================================================
+# Root / Health
+# =========================================================
+
+@app.get("/")
+def root():
+    return {
+        "service": "NTEC Analytics API",
+        "status": "ok"
+    }
+
 
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "version": "bq-all-period-20260310-6-search-console-oauth"
+        "version": "20260819-1"
     }
 
 
-# =============================
-# Channel Report
-# =============================
+# =========================================================
+# GA4: Channel Report
+# =========================================================
 
 @app.post("/api/ga4/standard/channel")
-def channel_report(req: ChannelReportRequest):
+def channel_report(
+    req: ChannelReportRequest
+):
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "sessionDefaultChannelGroup"}
+            {
+                "name":
+                    "sessionDefaultChannelGroup"
+            }
         ],
         "metrics": [
-            {"name": "sessions"},
-            {"name": "totalUsers"}
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            }
         ],
         "orderBys": [
             {
-                "metric": {"metricName": "sessions"},
+                "metric": {
+                    "metricName": "sessions"
+                },
                 "desc": True
             }
         ],
@@ -393,26 +792,45 @@ def channel_report(req: ChannelReportRequest):
     return call_ga4(body)
 
 
-# =============================
-# Page Flow (All)
-# =============================
+# =========================================================
+# GA4: Page Flow
+# =========================================================
 
 @app.post("/api/ga4/page/flow")
-def page_flow(req: PageFlowRequest):
-    display_dimension = get_display_dimension(req.displayDimension)
+def page_flow(
+    req: PageFlowRequest
+):
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "pageReferrer"},
-            {"name": display_dimension}
+            {
+                "name": "pageReferrer"
+            },
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "screenPageViews"}
+            {
+                "name": "screenPageViews"
+            }
         ],
         "orderBys": [
             {
-                "metric": {"metricName": "screenPageViews"},
+                "metric": {
+                    "metricName":
+                        "screenPageViews"
+                },
                 "desc": True
             }
         ],
@@ -422,32 +840,57 @@ def page_flow(req: PageFlowRequest):
     return call_ga4(body)
 
 
-# =============================
-# Page Flow From Specific Page
-# =============================
+# =========================================================
+# GA4: Page Flow From Specific Page
+# =========================================================
 
 @app.post("/api/ga4/page/flow/from-page")
-def page_flow_from_page(req: PageFlowFromPageRequest):
-    display_dimension = get_display_dimension(req.displayDimension)
-    ga4_match_type = get_ga4_match_type(req.matchType)
+def page_flow_from_page(
+    req: PageFlowFromPageRequest
+):
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
+
+    ga4_match_type = (
+        get_ga4_match_type(
+            req.matchType
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "pageReferrer"},
-            {"name": display_dimension}
+            {
+                "name": "pageReferrer"
+            },
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "screenPageViews"}
+            {
+                "name": "screenPageViews"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name="pageReferrer",
-            value=req.sourcePage,
-            match_type=ga4_match_type
-        ),
+        "dimensionFilter":
+            build_string_filter(
+                field_name="pageReferrer",
+                value=req.sourcePage,
+                match_type=ga4_match_type
+            ),
         "orderBys": [
             {
-                "metric": {"metricName": "screenPageViews"},
+                "metric": {
+                    "metricName":
+                        "screenPageViews"
+                },
                 "desc": True
             }
         ],
@@ -457,34 +900,64 @@ def page_flow_from_page(req: PageFlowFromPageRequest):
     return call_ga4(body)
 
 
-# =============================
-# Previous Pages Before Target Page
-# =============================
+# =========================================================
+# GA4: Previous Pages
+# =========================================================
 
 @app.post("/api/ga4/page/before-page")
-def previous_page(req: PreviousPageRequest):
-    match_field = get_match_field(req.matchType)
-    display_dimension = get_display_dimension(req.displayDimension)
-    ga4_match_type = get_ga4_match_type(req.filterMatchType)
+def previous_page(
+    req: PreviousPageRequest
+):
+    match_field = get_match_field(
+        req.matchType
+    )
+
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
+
+    ga4_match_type = (
+        get_ga4_match_type(
+            req.filterMatchType
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "pageReferrer"},
-            {"name": match_field},
-            {"name": display_dimension}
+            {
+                "name": "pageReferrer"
+            },
+            {
+                "name": match_field
+            },
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "screenPageViews"}
+            {
+                "name": "screenPageViews"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name=match_field,
-            value=req.targetPage,
-            match_type=ga4_match_type
-        ),
+        "dimensionFilter":
+            build_string_filter(
+                field_name=match_field,
+                value=req.targetPage,
+                match_type=ga4_match_type
+            ),
         "orderBys": [
             {
-                "metric": {"metricName": "screenPageViews"},
+                "metric": {
+                    "metricName":
+                        "screenPageViews"
+                },
                 "desc": True
             }
         ],
@@ -494,31 +967,51 @@ def previous_page(req: PreviousPageRequest):
     return call_ga4(body)
 
 
-# =============================
-# Conversion Pages
-# =============================
+# =========================================================
+# GA4: Conversion Pages
+# =========================================================
 
 @app.post("/api/ga4/conversion/pages")
-def conversion_pages(req: ConversionPagesRequest):
-    display_dimension = get_display_dimension(req.displayDimension)
+def conversion_pages(
+    req: ConversionPagesRequest
+):
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "eventName"},
-            {"name": display_dimension}
+            {
+                "name": "eventName"
+            },
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "eventCount"}
+            {
+                "name": "eventCount"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name="eventName",
-            value=req.eventName,
-            match_type="EXACT"
-        ),
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            ),
         "orderBys": [
             {
-                "metric": {"metricName": "eventCount"},
+                "metric": {
+                    "metricName":
+                        "eventCount"
+                },
                 "desc": True
             }
         ],
@@ -528,31 +1021,51 @@ def conversion_pages(req: ConversionPagesRequest):
     return call_ga4(body)
 
 
-# =============================
-# Conversion Path
-# =============================
+# =========================================================
+# GA4: Conversion Path
+# =========================================================
 
 @app.post("/api/ga4/conversion/path")
-def conversion_path(req: ConversionPathRequest):
-    display_dimension = get_display_dimension(req.displayDimension)
+def conversion_path(
+    req: ConversionPathRequest
+):
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "landingPage"},
-            {"name": display_dimension}
+            {
+                "name": "landingPage"
+            },
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "eventCount"}
+            {
+                "name": "eventCount"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name="eventName",
-            value=req.eventName,
-            match_type="EXACT"
-        ),
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            ),
         "orderBys": [
             {
-                "metric": {"metricName": "eventCount"},
+                "metric": {
+                    "metricName":
+                        "eventCount"
+                },
                 "desc": True
             }
         ],
@@ -562,76 +1075,123 @@ def conversion_path(req: ConversionPathRequest):
     return call_ga4(body)
 
 
-# =============================
-# Conversion Summary
-# =============================
+# =========================================================
+# GA4: Conversion Summary
+# =========================================================
 
 @app.post("/api/ga4/conversion/summary")
-def conversion_summary(req: ConversionSummaryRequest):
+def conversion_summary(
+    req: ConversionSummaryRequest
+):
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "eventName"}
+            {
+                "name": "eventName"
+            }
         ],
         "metrics": [
-            {"name": "eventCount"}
+            {
+                "name": "eventCount"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name="eventName",
-            value=req.eventName,
-            match_type="EXACT"
-        )
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            )
     }
 
     return call_ga4(body)
 
 
-# =============================
-# Thanks Page Summary
-# =============================
+# =========================================================
+# GA4: Thanks Page
+# =========================================================
 
-@app.post("/api/ga4/conversion/thanks-summary")
-def thanks_summary(req: ThanksPageSummaryRequest):
+@app.post(
+    "/api/ga4/conversion/thanks-summary"
+)
+def thanks_summary(
+    req: ThanksPageSummaryRequest
+):
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": "pagePath"}
+            {
+                "name": "pagePath"
+            }
         ],
         "metrics": [
-            {"name": "screenPageViews"},
-            {"name": "sessions"}
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "sessions"
+            }
         ],
-        "dimensionFilter": build_string_filter(
-            field_name="pagePath",
-            value=req.thanksPage,
-            match_type="EXACT"
-        )
+        "dimensionFilter":
+            build_string_filter(
+                field_name="pagePath",
+                value=req.thanksPage,
+                match_type="EXACT"
+            )
     }
 
     return call_ga4(body)
 
 
-# =============================
-# Exit Pages
-# =============================
+# =========================================================
+# GA4: Exit Pages
+# =========================================================
 
 @app.post("/api/ga4/page/exits")
-def page_exits(req: ExitPagesRequest):
-    display_dimension = get_display_dimension(req.displayDimension)
+def page_exits(
+    req: ExitPagesRequest
+):
+    display_dimension = (
+        get_display_dimension(
+            req.displayDimension
+        )
+    )
 
     body = {
-        "dateRanges": build_date_ranges(req.startDate, req.endDate, req.days),
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
         "dimensions": [
-            {"name": display_dimension}
+            {
+                "name": display_dimension
+            }
         ],
         "metrics": [
-            {"name": "sessions"},
-            {"name": "screenPageViews"},
-            {"name": "bounceRate"}
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "bounceRate"
+            }
         ],
         "orderBys": [
             {
-                "metric": {"metricName": "bounceRate"},
+                "metric": {
+                    "metricName":
+                        "bounceRate"
+                },
                 "desc": True
             }
         ],
@@ -641,15 +1201,23 @@ def page_exits(req: ExitPagesRequest):
     return call_ga4(body)
 
 
-# =============================
+# =========================================================
 # BigQuery: Users by Page
-# =============================
+# =========================================================
 
 @app.post("/api/bq/page/users")
-def bq_users_by_page(req: UsersByPageRequest):
-    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+def bq_users_by_page(
+    req: UsersByPageRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
+    )
 
     if req.matchType == "exact":
+
         page_condition = """
         (
           SELECT ep.value.string_value
@@ -657,10 +1225,17 @@ def bq_users_by_page(req: UsersByPageRequest):
           WHERE ep.key = 'page_location'
         ) = @targetPage
         """
+
         page_params = [
-            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+            bigquery.ScalarQueryParameter(
+                "targetPage",
+                "STRING",
+                req.targetPage
+            )
         ]
+
     else:
+
         page_condition = """
         (
           SELECT ep.value.string_value
@@ -668,55 +1243,102 @@ def bq_users_by_page(req: UsersByPageRequest):
           WHERE ep.key = 'page_location'
         ) LIKE @targetPageLike
         """
+
         page_params = [
-            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+            bigquery.ScalarQueryParameter(
+                "targetPageLike",
+                "STRING",
+                f"%{req.targetPage}%"
+            )
         ]
 
     sql = f"""
     SELECT
       user_pseudo_id,
       COUNT(*) AS page_views,
-      MIN(TIMESTAMP_MICROS(event_timestamp)) AS first_seen,
-      MAX(TIMESTAMP_MICROS(event_timestamp)) AS last_seen
-    FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+      MIN(
+        TIMESTAMP_MICROS(event_timestamp)
+      ) AS first_seen,
+      MAX(
+        TIMESTAMP_MICROS(event_timestamp)
+      ) AS last_seen
+    FROM
+      `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
     WHERE
       {date_condition}
       AND event_name = 'page_view'
       AND {page_condition}
-    GROUP BY user_pseudo_id
-    ORDER BY page_views DESC, last_seen DESC
+    GROUP BY
+      user_pseudo_id
+    ORDER BY
+      page_views DESC,
+      last_seen DESC
     LIMIT @limit
     """
 
-    params = date_params + page_params + [
-        bigquery.ScalarQueryParameter("limit", "INT64", req.limit)
-    ]
+    params = (
+        date_params
+        + page_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "limit",
+                "INT64",
+                req.limit
+            )
+        ]
+    )
 
-    rows = run_bq_query(sql, params)
+    rows = run_bq_query(
+        sql,
+        params
+    )
 
     return {
         "count": len(rows),
         "rows": [
             {
-                "userPseudoId": row["user_pseudo_id"],
-                "pageViews": row["page_views"],
-                "firstSeen": row["first_seen"].isoformat() if row["first_seen"] else None,
-                "lastSeen": row["last_seen"].isoformat() if row["last_seen"] else None
+                "userPseudoId":
+                    row["user_pseudo_id"],
+
+                "pageViews":
+                    row["page_views"],
+
+                "firstSeen":
+                    (
+                        row["first_seen"].isoformat()
+                        if row["first_seen"]
+                        else None
+                    ),
+
+                "lastSeen":
+                    (
+                        row["last_seen"].isoformat()
+                        if row["last_seen"]
+                        else None
+                    )
             }
             for row in rows
         ]
     }
 
 
-# =============================
+# =========================================================
 # BigQuery: User Paths by Target Page
-# =============================
+# =========================================================
 
 @app.post("/api/bq/user/path")
-def bq_user_path(req: UserPathRequest):
-    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+def bq_user_path(
+    req: UserPathRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
+    )
 
     if req.matchType == "exact":
+
         target_condition = """
         (
           SELECT ep.value.string_value
@@ -724,10 +1346,17 @@ def bq_user_path(req: UserPathRequest):
           WHERE ep.key = 'page_location'
         ) = @targetPage
         """
+
         target_params = [
-            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
+            bigquery.ScalarQueryParameter(
+                "targetPage",
+                "STRING",
+                req.targetPage
+            )
         ]
+
     else:
+
         target_condition = """
         (
           SELECT ep.value.string_value
@@ -735,85 +1364,176 @@ def bq_user_path(req: UserPathRequest):
           WHERE ep.key = 'page_location'
         ) LIKE @targetPageLike
         """
+
         target_params = [
-            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
+            bigquery.ScalarQueryParameter(
+                "targetPageLike",
+                "STRING",
+                f"%{req.targetPage}%"
+            )
         ]
 
     sql = f"""
-    WITH target_users AS (
-      SELECT DISTINCT user_pseudo_id
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+    WITH target_hits AS (
+      SELECT
+        user_pseudo_id,
+        MAX(
+          TIMESTAMP_MICROS(event_timestamp)
+        ) AS latest_target_time
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
       WHERE
         {date_condition}
         AND event_name = 'page_view'
         AND {target_condition}
+      GROUP BY
+        user_pseudo_id
+    ),
+
+    target_users AS (
+      SELECT
+        user_pseudo_id,
+        latest_target_time
+      FROM
+        target_hits
+      ORDER BY
+        latest_target_time DESC
       LIMIT @limitUsers
     ),
+
     page_events AS (
       SELECT
         e.user_pseudo_id,
-        TIMESTAMP_MICROS(e.event_timestamp) AS event_time,
+
+        TIMESTAMP_MICROS(
+          e.event_timestamp
+        ) AS event_time,
+
         (
           SELECT ep.value.int_value
           FROM UNNEST(e.event_params) ep
           WHERE ep.key = 'ga_session_id'
         ) AS ga_session_id,
+
         (
           SELECT ep.value.string_value
           FROM UNNEST(e.event_params) ep
           WHERE ep.key = 'page_location'
         ) AS page_location,
+
         (
           SELECT ep.value.string_value
           FROM UNNEST(e.event_params) ep
           WHERE ep.key = 'page_title'
         ) AS page_title
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
-      INNER JOIN target_users tu
-        ON e.user_pseudo_id = tu.user_pseudo_id
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
+
+      INNER JOIN
+        target_users tu
+
+      ON
+        e.user_pseudo_id
+        = tu.user_pseudo_id
+
       WHERE
-        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
+        {
+            date_condition.replace(
+                "_TABLE_SUFFIX",
+                "e._TABLE_SUFFIX"
+            )
+        }
+
         AND e.event_name = 'page_view'
     ),
+
     ranked AS (
       SELECT
         *,
+
         ROW_NUMBER() OVER (
-          PARTITION BY user_pseudo_id
-          ORDER BY event_time DESC
+          PARTITION BY
+            user_pseudo_id
+
+          ORDER BY
+            event_time DESC
         ) AS rn
-      FROM page_events
+
+      FROM
+        page_events
     )
+
     SELECT
       user_pseudo_id,
       ga_session_id,
       event_time,
       page_location,
       page_title
-    FROM ranked
-    WHERE rn <= @stepsPerUser
-    ORDER BY user_pseudo_id, event_time ASC
+
+    FROM
+      ranked
+
+    WHERE
+      rn <= @stepsPerUser
+
+    ORDER BY
+      user_pseudo_id,
+      event_time ASC
     """
 
-    params = date_params + target_params + [
-        bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
-        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
-    ]
+    params = (
+        date_params
+        + target_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "limitUsers",
+                "INT64",
+                req.limitUsers
+            ),
+            bigquery.ScalarQueryParameter(
+                "stepsPerUser",
+                "INT64",
+                req.stepsPerUser
+            )
+        ]
+    )
 
-    rows = run_bq_query(sql, params)
+    rows = run_bq_query(
+        sql,
+        params
+    )
 
     grouped = {}
+
     for row in rows:
-        user_id = row["user_pseudo_id"]
+
+        user_id = (
+            row["user_pseudo_id"]
+        )
+
         if user_id not in grouped:
             grouped[user_id] = []
 
-        grouped[user_id].append({
-            "sessionId": row["ga_session_id"],
-            "eventTime": row["event_time"].isoformat() if row["event_time"] else None,
-            "pageLocation": row["page_location"],
-            "pageTitle": row["page_title"]
-        })
+        grouped[user_id].append(
+            {
+                "sessionId":
+                    row["ga_session_id"],
+
+                "eventTime":
+                    (
+                        row["event_time"].isoformat()
+                        if row["event_time"]
+                        else None
+                    ),
+
+                "pageLocation":
+                    row["page_location"],
+
+                "pageTitle":
+                    row["page_title"]
+            }
+        )
 
     return {
         "count": len(grouped),
@@ -822,201 +1542,138 @@ def bq_user_path(req: UserPathRequest):
                 "userPseudoId": user_id,
                 "journey": journey
             }
-            for user_id, journey in grouped.items()
+            for user_id, journey
+            in grouped.items()
         ]
     }
 
 
-# =============================
+# =========================================================
 # BigQuery: Single User Journey
-# =============================
+# =========================================================
 
 @app.post("/api/bq/user/journey")
-def bq_single_user_journey(req: UserJourneyRequest):
-    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
+def bq_single_user_journey(
+    req: UserJourneyRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
+    )
 
     sql = f"""
     SELECT
       user_pseudo_id,
-      TIMESTAMP_MICROS(event_timestamp) AS event_time,
+
+      TIMESTAMP_MICROS(
+        event_timestamp
+      ) AS event_time,
+
       (
         SELECT ep.value.int_value
         FROM UNNEST(event_params) ep
         WHERE ep.key = 'ga_session_id'
       ) AS ga_session_id,
+
       (
         SELECT ep.value.string_value
         FROM UNNEST(event_params) ep
         WHERE ep.key = 'page_location'
       ) AS page_location,
+
       (
         SELECT ep.value.string_value
         FROM UNNEST(event_params) ep
         WHERE ep.key = 'page_title'
       ) AS page_title
-    FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
+    FROM
+      `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
     WHERE
       {date_condition}
+
       AND event_name = 'page_view'
-      AND user_pseudo_id = @userPseudoId
-    ORDER BY event_time ASC
-    LIMIT @limit
+
+      AND user_pseudo_id
+          = @userPseudoId
+
+    ORDER BY
+      event_time ASC
+
+    LIMIT
+      @limit
     """
 
-    params = date_params + [
-        bigquery.ScalarQueryParameter("userPseudoId", "STRING", req.userPseudoId),
-        bigquery.ScalarQueryParameter("limit", "INT64", req.limit),
-    ]
+    params = (
+        date_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "userPseudoId",
+                "STRING",
+                req.userPseudoId
+            ),
 
-    rows = run_bq_query(sql, params)
+            bigquery.ScalarQueryParameter(
+                "limit",
+                "INT64",
+                req.limit
+            )
+        ]
+    )
+
+    rows = run_bq_query(
+        sql,
+        params
+    )
 
     return {
         "count": len(rows),
         "rows": [
             {
-                "userPseudoId": row["user_pseudo_id"],
-                "sessionId": row["ga_session_id"],
-                "eventTime": row["event_time"].isoformat() if row["event_time"] else None,
-                "pageLocation": row["page_location"],
-                "pageTitle": row["page_title"]
+                "userPseudoId":
+                    row["user_pseudo_id"],
+
+                "sessionId":
+                    row["ga_session_id"],
+
+                "eventTime":
+                    (
+                        row["event_time"].isoformat()
+                        if row["event_time"]
+                        else None
+                    ),
+
+                "pageLocation":
+                    row["page_location"],
+
+                "pageTitle":
+                    row["page_title"]
             }
             for row in rows
         ]
     }
 
 
-# =============================
+# =========================================================
 # BigQuery: Pre Pages Before Target
-# =============================
+# =========================================================
 
 @app.post("/api/bq/page/pre-pages")
-def bq_pre_pages_before_target(req: PrePagesBeforeTargetRequest):
-    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
-
-    if req.matchType == "exact":
-        target_condition = """
-        (
-          SELECT ep.value.string_value
-          FROM UNNEST(event_params) ep
-          WHERE ep.key = 'page_location'
-        ) = @targetPage
-        """
-        target_params = [
-            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
-        ]
-    else:
-        target_condition = """
-        (
-          SELECT ep.value.string_value
-          FROM UNNEST(event_params) ep
-          WHERE ep.key = 'page_location'
-        ) LIKE @targetPageLike
-        """
-        target_params = [
-            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
-        ]
-
-    sql = f"""
-    WITH target_hits AS (
-      SELECT
-        user_pseudo_id,
-        TIMESTAMP_MICROS(event_timestamp) AS target_time
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
-      WHERE
-        {date_condition}
-        AND event_name = 'page_view'
-        AND {target_condition}
-    ),
-    target_users AS (
-      SELECT
-        user_pseudo_id,
-        MAX(target_time) AS latest_target_time
-      FROM target_hits
-      GROUP BY user_pseudo_id
-      ORDER BY latest_target_time DESC
-      LIMIT @limitUsers
-    ),
-    page_events AS (
-      SELECT
-        e.user_pseudo_id,
-        TIMESTAMP_MICROS(e.event_timestamp) AS event_time,
-        (
-          SELECT ep.value.string_value
-          FROM UNNEST(e.event_params) ep
-          WHERE ep.key = 'page_location'
-        ) AS page_location,
-        (
-          SELECT ep.value.string_value
-          FROM UNNEST(e.event_params) ep
-          WHERE ep.key = 'page_title'
-        ) AS page_title
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
-      INNER JOIN target_users tu
-        ON e.user_pseudo_id = tu.user_pseudo_id
-      WHERE
-        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
-        AND e.event_name = 'page_view'
-        AND TIMESTAMP_MICROS(e.event_timestamp) <= tu.latest_target_time
-    ),
-    ranked AS (
-      SELECT
-        *,
-        ROW_NUMBER() OVER (
-          PARTITION BY user_pseudo_id
-          ORDER BY event_time DESC
-        ) AS rn_desc
-      FROM page_events
+def bq_pre_pages_before_target(
+    req: PrePagesBeforeTargetRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
     )
-    SELECT
-      user_pseudo_id,
-      event_time,
-      page_location,
-      page_title
-    FROM ranked
-    WHERE rn_desc <= @stepsPerUser
-    ORDER BY user_pseudo_id, event_time ASC
-    """
-
-    params = date_params + target_params + [
-        bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
-        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
-    ]
-
-    rows = run_bq_query(sql, params)
-
-    grouped = {}
-    for row in rows:
-        user_id = row["user_pseudo_id"]
-        if user_id not in grouped:
-            grouped[user_id] = []
-
-        grouped[user_id].append({
-            "eventTime": row["event_time"].isoformat() if row["event_time"] else None,
-            "pageLocation": row["page_location"],
-            "pageTitle": row["page_title"]
-        })
-
-    return {
-        "count": len(grouped),
-        "rows": [
-            {
-                "userPseudoId": user_id,
-                "prePages": pages
-            }
-            for user_id, pages in grouped.items()
-        ]
-    }
-
-
-# =============================
-# BigQuery: Conversion Pre Pages
-# =============================
-
-@app.post("/api/bq/conversion/pre-pages")
-def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
-    date_condition, date_params = build_bq_date_condition(req.startDate, req.endDate)
 
     if req.matchType == "exact":
+
         target_condition = """
         (
           SELECT ep.value.string_value
@@ -1024,9 +1681,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
           WHERE ep.key = 'page_location'
         ) = @targetPage
         """
-        target_params = [
-            bigquery.ScalarQueryParameter("targetPage", "STRING", req.targetPage)
-        ]
+
         exclude_target_condition = """
         (
           SELECT ep.value.string_value
@@ -1034,7 +1689,17 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
           WHERE ep.key = 'page_location'
         ) != @targetPage
         """
+
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPage",
+                "STRING",
+                req.targetPage
+            )
+        ]
+
     else:
+
         target_condition = """
         (
           SELECT ep.value.string_value
@@ -1042,9 +1707,7 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
           WHERE ep.key = 'page_location'
         ) LIKE @targetPageLike
         """
-        target_params = [
-            bigquery.ScalarQueryParameter("targetPageLike", "STRING", f"%{req.targetPage}%")
-        ]
+
         exclude_target_condition = """
         (
           SELECT ep.value.string_value
@@ -1053,140 +1716,543 @@ def bq_conversion_pre_pages(req: ConversionPrePagesRequest):
         ) NOT LIKE @targetPageLike
         """
 
-    exclude_condition = ""
-
-    if req.excludePages:
-        conditions = [
-            f"""(
-              SELECT ep.value.string_value
-              FROM UNNEST(e.event_params) ep
-              WHERE ep.key = 'page_location'
-            ) NOT LIKE '%{p}%'"""
-            for p in req.excludePages
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPageLike",
+                "STRING",
+                f"%{req.targetPage}%"
+            )
         ]
-        exclude_condition = "AND " + " AND ".join(conditions)
 
     sql = f"""
     WITH target_hits AS (
       SELECT
         user_pseudo_id,
-        TIMESTAMP_MICROS(event_timestamp) AS target_time
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
+        TIMESTAMP_MICROS(
+          event_timestamp
+        ) AS target_time
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
       WHERE
         {date_condition}
+
         AND event_name = 'page_view'
+
         AND {target_condition}
     ),
-    latest_target_per_user AS (
+
+    target_users AS (
       SELECT
         user_pseudo_id,
-        MAX(target_time) AS latest_target_time
-      FROM target_hits
-      GROUP BY user_pseudo_id
-      ORDER BY latest_target_time DESC
-      LIMIT @limitUsers
+
+        MAX(
+          target_time
+        ) AS latest_target_time
+
+      FROM
+        target_hits
+
+      GROUP BY
+        user_pseudo_id
+
+      ORDER BY
+        latest_target_time DESC
+
+      LIMIT
+        @limitUsers
     ),
+
     page_events AS (
       SELECT
         e.user_pseudo_id,
-        TIMESTAMP_MICROS(e.event_timestamp) AS event_time,
+
+        TIMESTAMP_MICROS(
+          e.event_timestamp
+        ) AS event_time,
+
         (
           SELECT ep.value.string_value
           FROM UNNEST(e.event_params) ep
           WHERE ep.key = 'page_location'
         ) AS page_location,
+
         (
           SELECT ep.value.string_value
           FROM UNNEST(e.event_params) ep
           WHERE ep.key = 'page_title'
         ) AS page_title
-      FROM `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
-      INNER JOIN latest_target_per_user t
-        ON e.user_pseudo_id = t.user_pseudo_id
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
+
+      INNER JOIN
+        target_users tu
+
+      ON
+        e.user_pseudo_id
+        = tu.user_pseudo_id
+
       WHERE
-        {date_condition.replace("_TABLE_SUFFIX", "e._TABLE_SUFFIX")}
+        {
+            date_condition.replace(
+                "_TABLE_SUFFIX",
+                "e._TABLE_SUFFIX"
+            )
+        }
+
         AND e.event_name = 'page_view'
-        AND TIMESTAMP_MICROS(e.event_timestamp) < t.latest_target_time
+
+        AND TIMESTAMP_MICROS(
+            e.event_timestamp
+        ) < tu.latest_target_time
+
         AND {exclude_target_condition}
-        {exclude_condition}
     ),
+
     ranked AS (
       SELECT
         *,
+
         ROW_NUMBER() OVER (
-          PARTITION BY user_pseudo_id
-          ORDER BY event_time DESC
+          PARTITION BY
+            user_pseudo_id
+
+          ORDER BY
+            event_time DESC
         ) AS rn_desc
-      FROM page_events
+
+      FROM
+        page_events
     )
+
+    SELECT
+      user_pseudo_id,
+      event_time,
+      page_location,
+      page_title
+
+    FROM
+      ranked
+
+    WHERE
+      rn_desc <= @stepsPerUser
+
+    ORDER BY
+      user_pseudo_id,
+      event_time ASC
+    """
+
+    params = (
+        date_params
+        + target_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "limitUsers",
+                "INT64",
+                req.limitUsers
+            ),
+
+            bigquery.ScalarQueryParameter(
+                "stepsPerUser",
+                "INT64",
+                req.stepsPerUser
+            )
+        ]
+    )
+
+    rows = run_bq_query(
+        sql,
+        params
+    )
+
+    grouped = {}
+
+    for row in rows:
+
+        user_id = (
+            row["user_pseudo_id"]
+        )
+
+        if user_id not in grouped:
+            grouped[user_id] = []
+
+        grouped[user_id].append(
+            {
+                "eventTime":
+                    (
+                        row["event_time"].isoformat()
+                        if row["event_time"]
+                        else None
+                    ),
+
+                "pageLocation":
+                    row["page_location"],
+
+                "pageTitle":
+                    row["page_title"]
+            }
+        )
+
+    return {
+        "count": len(grouped),
+        "rows": [
+            {
+                "userPseudoId":
+                    user_id,
+
+                "prePages":
+                    pages
+            }
+            for user_id, pages
+            in grouped.items()
+        ]
+    }
+
+
+# =========================================================
+# BigQuery: Conversion Pre Pages
+# =========================================================
+
+@app.post(
+    "/api/bq/conversion/pre-pages"
+)
+def bq_conversion_pre_pages(
+    req: ConversionPrePagesRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
+    )
+
+    if req.matchType == "exact":
+
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) = @targetPage
+        """
+
+        exclude_target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) != @targetPage
+        """
+
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPage",
+                "STRING",
+                req.targetPage
+            )
+        ]
+
+    else:
+
+        target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) LIKE @targetPageLike
+        """
+
+        exclude_target_condition = """
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) NOT LIKE @targetPageLike
+        """
+
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPageLike",
+                "STRING",
+                f"%{req.targetPage}%"
+            )
+        ]
+
+    (
+        exclude_condition,
+        exclude_params
+    ) = build_bq_exclude_conditions(
+        req.excludePages,
+        alias="e"
+    )
+
+    sql = f"""
+    WITH target_hits AS (
+      SELECT
+        user_pseudo_id,
+
+        TIMESTAMP_MICROS(
+          event_timestamp
+        ) AS target_time
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
+      WHERE
+        {date_condition}
+
+        AND event_name = 'page_view'
+
+        AND {target_condition}
+    ),
+
+    latest_target_per_user AS (
+      SELECT
+        user_pseudo_id,
+
+        MAX(
+          target_time
+        ) AS latest_target_time
+
+      FROM
+        target_hits
+
+      GROUP BY
+        user_pseudo_id
+
+      ORDER BY
+        latest_target_time DESC
+
+      LIMIT
+        @limitUsers
+    ),
+
+    page_events AS (
+      SELECT
+        e.user_pseudo_id,
+
+        TIMESTAMP_MICROS(
+          e.event_timestamp
+        ) AS event_time,
+
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_location'
+        ) AS page_location,
+
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(e.event_params) ep
+          WHERE ep.key = 'page_title'
+        ) AS page_title
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*` e
+
+      INNER JOIN
+        latest_target_per_user t
+
+      ON
+        e.user_pseudo_id
+        = t.user_pseudo_id
+
+      WHERE
+        {
+            date_condition.replace(
+                "_TABLE_SUFFIX",
+                "e._TABLE_SUFFIX"
+            )
+        }
+
+        AND e.event_name = 'page_view'
+
+        AND TIMESTAMP_MICROS(
+            e.event_timestamp
+        ) < t.latest_target_time
+
+        AND {exclude_target_condition}
+
+        {exclude_condition}
+    ),
+
+    ranked AS (
+      SELECT
+        *,
+
+        ROW_NUMBER() OVER (
+          PARTITION BY
+            user_pseudo_id
+
+          ORDER BY
+            event_time DESC
+        ) AS rn_desc
+
+      FROM
+        page_events
+    )
+
     SELECT
       page_location,
       page_title,
+
       COUNT(*) AS appearance_count,
-      COUNT(DISTINCT user_pseudo_id) AS users_count
-    FROM ranked
-    WHERE rn_desc <= @stepsPerUser
-    GROUP BY page_location, page_title
-    ORDER BY users_count DESC, appearance_count DESC
+
+      COUNT(
+        DISTINCT user_pseudo_id
+      ) AS users_count
+
+    FROM
+      ranked
+
+    WHERE
+      rn_desc <= @stepsPerUser
+
+    GROUP BY
+      page_location,
+      page_title
+
+    ORDER BY
+      users_count DESC,
+      appearance_count DESC
+
     LIMIT 100
     """
 
-    params = date_params + target_params + [
-        bigquery.ScalarQueryParameter("limitUsers", "INT64", req.limitUsers),
-        bigquery.ScalarQueryParameter("stepsPerUser", "INT64", req.stepsPerUser)
-    ]
+    params = (
+        date_params
+        + target_params
+        + exclude_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "limitUsers",
+                "INT64",
+                req.limitUsers
+            ),
 
-    rows = run_bq_query(sql, params)
+            bigquery.ScalarQueryParameter(
+                "stepsPerUser",
+                "INT64",
+                req.stepsPerUser
+            )
+        ]
+    )
+
+    rows = run_bq_query(
+        sql,
+        params
+    )
 
     return {
         "count": len(rows),
+
         "rows": [
             {
-                "pageLocation": row["page_location"],
-                "pageTitle": row["page_title"],
-                "appearanceCount": row["appearance_count"],
-                "usersCount": row["users_count"]
+                "pageLocation":
+                    row["page_location"],
+
+                "pageTitle":
+                    row["page_title"],
+
+                "appearanceCount":
+                    row["appearance_count"],
+
+                "usersCount":
+                    row["users_count"]
             }
             for row in rows
         ]
     }
 
 
-# =============================
-# Search Console: Sites List
-# =============================
+# =========================================================
+# Search Console: Sites
+# =========================================================
 
 @app.get("/api/search-console/sites")
 def search_console_sites():
-    service = get_search_console_service()
+
+    service = (
+        get_search_console_service()
+    )
 
     try:
-        response = service.sites().list().execute()
+        response = (
+            service
+            .sites()
+            .list()
+            .execute()
+        )
+
         return response
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search Console sites list failed: {str(e)}")
+
+        print(
+            "=== SEARCH CONSOLE SITES ERROR ==="
+        )
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Search Console sites list failed: "
+                f"{str(e)}"
+            )
+        )
 
 
-# =============================
+# =========================================================
 # Search Console: Keywords
-# =============================
+# =========================================================
 
-@app.post("/api/search-console/keywords")
-def search_console_keywords(req: SearchConsoleKeywordsRequest):
-    service = get_search_console_service()
+@app.post(
+    "/api/search-console/keywords"
+)
+def search_console_keywords(
+    req: SearchConsoleKeywordsRequest
+):
+    service = (
+        get_search_console_service()
+    )
 
     body = {
         "startDate": req.startDate,
         "endDate": req.endDate,
-        "dimensions": ["query", "page"],
+        "dimensions": [
+            "query",
+            "page"
+        ],
         "rowLimit": req.rowLimit
     }
 
     try:
-        response = service.searchanalytics().query(
-            siteUrl=req.siteUrl,
-            body=body
-        ).execute()
+        response = (
+            service
+            .searchanalytics()
+            .query(
+                siteUrl=req.siteUrl,
+                body=body
+            )
+            .execute()
+        )
+
         return response
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Search Console query failed: {str(e)}")
+
+        print(
+            "=== SEARCH CONSOLE QUERY ERROR ==="
+        )
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Search Console query failed: "
+                f"{str(e)}"
+            )
+        )
