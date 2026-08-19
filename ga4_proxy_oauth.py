@@ -3023,42 +3023,36 @@ def dashboard_summary(
     # Channel Drilldown
     # -----------------------------------------------------
 
-    channel_body = {
-        "dateRanges":
-            current_date_ranges,
+       channel_body = {
+        "dateRanges": current_date_ranges,
 
         "dimensions": [
             {
-                "name":
-                    "sessionDefaultChannelGroup"
+                "name": "sessionDefaultChannelGroup"
             }
         ],
 
         "metrics": [
             {
-                "name":
-                    "sessions"
+                "name": "sessions"
             },
             {
-                "name":
-                    "totalUsers"
+                "name": "totalUsers"
             }
         ],
 
         "orderBys": [
             {
                 "metric": {
-                    "metricName":
-                        "sessions"
+                    "metricName": "sessions"
                 },
                 "desc": True
             }
         ],
 
-        "limit":
-            build_limit(
-                req.channelLimit
-            )
+        "limit": build_limit(
+            req.channelLimit
+        )
     }
 
     channel_response = call_ga4(
@@ -3070,54 +3064,54 @@ def dashboard_summary(
     )
 
 
-    channel_comparison = (
-    build_channel_comparison(
-        channels,
-        previous_channels
-    )
-)
     previous_channel_body = {
-    "dateRanges": [
-        previous_period
-    ],
+        "dateRanges": [
+            previous_period
+        ],
 
-    "dimensions": [
-        {
-            "name": "sessionDefaultChannelGroup"
-        }
-    ],
+        "dimensions": [
+            {
+                "name": "sessionDefaultChannelGroup"
+            }
+        ],
 
-    "metrics": [
-        {
-            "name": "sessions"
-        },
-        {
-            "name": "totalUsers"
-        }
-    ],
-
-    "orderBys": [
-        {
-            "metric": {
-                "metricName": "sessions"
+        "metrics": [
+            {
+                "name": "sessions"
             },
-            "desc": True
-        }
-    ],
+            {
+                "name": "totalUsers"
+            }
+        ],
 
-    "limit": build_limit(
-        req.channelLimit
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName": "sessions"
+                },
+                "desc": True
+            }
+        ],
+
+        "limit": build_limit(
+            req.channelLimit
+        )
+    }
+
+    previous_channel_response = call_ga4(
+        previous_channel_body
     )
-}
 
-previous_channel_response = call_ga4(
-    previous_channel_body
-)
+    previous_channels = extract_channel_rows(
+        previous_channel_response
+    )
 
-previous_channels = extract_channel_rows(
-    previous_channel_response
-)
-
+    channel_comparison = (
+        build_channel_comparison(
+            channels,
+            previous_channels
+        )
+    )
     # -----------------------------------------------------
     # Business Questions
     # -----------------------------------------------------
