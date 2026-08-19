@@ -6,6 +6,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from datetime import datetime, timedelta
 
 import requests
 import os
@@ -536,11 +537,363 @@ def build_bq_exclude_conditions(
         params
     )
 
+# =========================================================
+# Dashboard Utils
+# =========================================================
+
+def calculate_previous_period(
+    start_date: Optional[str],
+    end_date: Optional[str],
+    days: int
+):
+    if start_date and end_date:
+        start = datetime.strptime(
+            start_date,
+            "%Y-%m-%d"
+        )
+
+        end = datetime.strptime(
+            end_date,
+            "%Y-%m-%d"
+        )
+
+        period_days = (
+            end - start
+        ).days + 1
+
+        previous_end = (
+            start - timedelta(days=1)
+        )
+
+        previous_start = (
+            previous_end
+            - timedelta(days=period_days - 1)
+        )
+
+        return {
+            "startDate":
+                previous_start.strftime(
+                    "%Y-%m-%d"
+                ),
+
+            "endDate":
+                previous_end.strftime(
+                    "%Y-%m-%d"
+                )
+        }
+
+    return {
+        "startDate":
+            f"{days * 2}daysAgo",
+
+        "endDate":
+            f"{days + 1}daysAgo"
+    }
+
+
+def safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def safe_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def percent_change(
+    current,
+    previous
+):
+    current = safe_float(current)
+    previous = safe_float(previous)
+
+    if previous == 0:
+        if current == 0:
+            return 0.0
+        return None
+
+    return round(
+        (
+            (current - previous)
+            / previous
+        ) * 100,
+        1
+    )
+
+
+def health_from_change(
+    change_percent,
+    positive_is_good=True
+):
+    if change_percent is None:
+        return "unknown"
+
+    change = (
+        change_percent
+        if positive_is_good
+        else -change_percent
+    )
+
+    if change >= 5:
+        return "good"
+
+    if change <= -5:
+        return "warning"
+
+    return "neutral"
+
+
+def get_metric_value(
+    response: dict,
+    metric_index: int
+):
+    rows = response.get(
+        "rows",
+        []
+    )
+
+    if not rows:
+        return 0
+
+    metric_values = rows[0].get(
+        "metricValues",
+        []
+    )
+
+    if len(metric_values) <= metric_index:
+        return 0
+
+    return metric_values[
+        metric_index
+    ].get(
+        "value",
+        0
+    )
+
+
+def extract_channel_rows(
+    response: dict
+):
+    result = []
+
+    for row in response.get(
+        "rows",
+        []
+    ):
+        dimensions = row.get(
+            "dimensionValues",
+            []
+        )
+
+        metrics = row.get(
+            "metricValues",
+            []
+        )
+
+        channel = (
+            dimensions[0].get(
+                "value",
+                "(not set)"
+            )
+            if dimensions
+            else "(not set)"
+        )
+
+        sessions = (
+            safe_int(
+                metrics[0].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 0
+            else 0
+        )
+
+        users = (
+            safe_int(
+                metrics[1].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 1
+            else 0
+        )
+
+        result.append(
+            {
+                "channel": channel,
+                "sessions": sessions,
+                "users": users
+            }
+        )
+
+    return result
+
+
+def build_business_questions(
+    kpis: dict,
+    channels: list
+):
+    questions = []
+
+    sessions_change = (
+        kpis
+        .get("sessions", {})
+        .get("changePercent")
+    )
+
+    users_change = (
+        kpis
+        .get("users", {})
+        .get("changePercent")
+    )
+
+    if (
+        sessions_change is not None
+        and sessions_change < -5
+    ):
+        questions.append(
+            {
+                "id": "traffic-down",
+                "question":
+                    "なぜセッション数が前期間より減っている？",
+                "drilldown":
+                    "channel"
+            }
+        )
+
+    if (
+        users_change is not None
+        and users_change < -5
+    ):
+        questions.append(
+            {
+                "id": "users-down",
+                "question":
+                    "新規・既存を含むユーザー数減少の主因はどのチャネル？",
+                "drilldown":
+                    "channel"
+            }
+        )
+
+    unassigned = next(
+        (
+            row
+            for row in channels
+            if row["channel"]
+            == "Unassigned"
+        ),
+        None
+    )
+
+    total_sessions = sum(
+        row["sessions"]
+        for row in channels
+    )
+
+    if (
+        unassigned
+        and total_sessions > 0
+    ):
+        ratio = (
+            unassigned["sessions"]
+            / total_sessions
+        ) * 100
+
+        if ratio >= 5:
+            questions.append(
+                {
+                    "id":
+                        "unassigned-high",
+
+                    "question":
+                        "Unassigned流入が多いのはなぜ？UTMや流入元分類に問題はない？",
+
+                    "drilldown":
+                        "unassigned"
+                }
+            )
+
+    paid_social = next(
+        (
+            row
+            for row in channels
+            if row["channel"]
+            == "Paid Social"
+        ),
+        None
+    )
+
+    if paid_social:
+        questions.append(
+            {
+                "id":
+                    "paid-social-conversion",
+
+                "question":
+                    "Paid Socialから来たユーザーはイベント閲覧や予約につながっている？",
+
+                "drilldown":
+                    "conversion"
+            }
+        )
+
+    organic = next(
+        (
+            row
+            for row in channels
+            if row["channel"]
+            == "Organic Search"
+        ),
+        None
+    )
+
+    if organic:
+        questions.append(
+            {
+                "id":
+                    "organic-conversion",
+
+                "question":
+                    "Organic Searchから予約につながっているページはどれ？",
+
+                "drilldown":
+                    "conversion"
+            }
+        )
+
+    questions.append(
+        {
+            "id":
+                "reservation-path",
+
+            "question":
+                "予約完了ユーザーは直前にどのページを見ている？",
+
+            "drilldown":
+                "conversion-pre-pages"
+        }
+    )
+
+    return questions[:6]
 
 # =========================================================
 # Request Models
 # =========================================================
 
+class DashboardSummaryRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = Field(default=30, ge=1, le=365)
+    channelLimit: int = Field(default=10, ge=1, le=50)
+    
 class ChannelReportRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
@@ -2256,3 +2609,514 @@ def search_console_keywords(
                 f"{str(e)}"
             )
         )
+
+# =========================================================
+# Dashboard: Pulse Summary
+# =========================================================
+
+@app.post("/api/dashboard/summary")
+def dashboard_summary(
+    req: DashboardSummaryRequest
+):
+
+    # -----------------------------------------------------
+    # Current period
+    # -----------------------------------------------------
+
+    current_date_ranges = (
+        build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        )
+    )
+
+    current_overview_body = {
+        "dateRanges":
+            current_date_ranges,
+
+        "metrics": [
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            },
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "engagedSessions"
+            }
+        ]
+    }
+
+    current_overview = call_ga4(
+        current_overview_body
+    )
+
+
+    # -----------------------------------------------------
+    # Previous period
+    # -----------------------------------------------------
+
+    previous_period = (
+        calculate_previous_period(
+            req.startDate,
+            req.endDate,
+            req.days
+        )
+    )
+
+    previous_overview_body = {
+        "dateRanges": [
+            previous_period
+        ],
+
+        "metrics": [
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            },
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "engagedSessions"
+            }
+        ]
+    }
+
+    previous_overview = call_ga4(
+        previous_overview_body
+    )
+
+
+    # -----------------------------------------------------
+    # Current metrics
+    # -----------------------------------------------------
+
+    current_sessions = safe_int(
+        get_metric_value(
+            current_overview,
+            0
+        )
+    )
+
+    current_users = safe_int(
+        get_metric_value(
+            current_overview,
+            1
+        )
+    )
+
+    current_pageviews = safe_int(
+        get_metric_value(
+            current_overview,
+            2
+        )
+    )
+
+    current_engaged = safe_int(
+        get_metric_value(
+            current_overview,
+            3
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # Previous metrics
+    # -----------------------------------------------------
+
+    previous_sessions = safe_int(
+        get_metric_value(
+            previous_overview,
+            0
+        )
+    )
+
+    previous_users = safe_int(
+        get_metric_value(
+            previous_overview,
+            1
+        )
+    )
+
+    previous_pageviews = safe_int(
+        get_metric_value(
+            previous_overview,
+            2
+        )
+    )
+
+    previous_engaged = safe_int(
+        get_metric_value(
+            previous_overview,
+            3
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # Changes
+    # -----------------------------------------------------
+
+    sessions_change = percent_change(
+        current_sessions,
+        previous_sessions
+    )
+
+    users_change = percent_change(
+        current_users,
+        previous_users
+    )
+
+    pageviews_change = percent_change(
+        current_pageviews,
+        previous_pageviews
+    )
+
+    engaged_change = percent_change(
+        current_engaged,
+        previous_engaged
+    )
+
+
+    # -----------------------------------------------------
+    # KPI Object
+    # -----------------------------------------------------
+
+    kpis = {
+        "sessions": {
+            "label":
+                "Sessions",
+
+            "value":
+                current_sessions,
+
+            "previousValue":
+                previous_sessions,
+
+            "changePercent":
+                sessions_change,
+
+            "status":
+                health_from_change(
+                    sessions_change
+                ),
+
+            "lineage": {
+                "source":
+                    "GA4 Data API",
+
+                "metric":
+                    "sessions",
+
+                "endpoint":
+                    "/api/dashboard/summary"
+            }
+        },
+
+        "users": {
+            "label":
+                "Users",
+
+            "value":
+                current_users,
+
+            "previousValue":
+                previous_users,
+
+            "changePercent":
+                users_change,
+
+            "status":
+                health_from_change(
+                    users_change
+                ),
+
+            "lineage": {
+                "source":
+                    "GA4 Data API",
+
+                "metric":
+                    "totalUsers",
+
+                "endpoint":
+                    "/api/dashboard/summary"
+            }
+        },
+
+        "pageViews": {
+            "label":
+                "Page Views",
+
+            "value":
+                current_pageviews,
+
+            "previousValue":
+                previous_pageviews,
+
+            "changePercent":
+                pageviews_change,
+
+            "status":
+                health_from_change(
+                    pageviews_change
+                ),
+
+            "lineage": {
+                "source":
+                    "GA4 Data API",
+
+                "metric":
+                    "screenPageViews",
+
+                "endpoint":
+                    "/api/dashboard/summary"
+            }
+        },
+
+        "engagedSessions": {
+            "label":
+                "Engaged Sessions",
+
+            "value":
+                current_engaged,
+
+            "previousValue":
+                previous_engaged,
+
+            "changePercent":
+                engaged_change,
+
+            "status":
+                health_from_change(
+                    engaged_change
+                ),
+
+            "lineage": {
+                "source":
+                    "GA4 Data API",
+
+                "metric":
+                    "engagedSessions",
+
+                "endpoint":
+                    "/api/dashboard/summary"
+            }
+        }
+    }
+
+
+    # -----------------------------------------------------
+    # Channel Drilldown
+    # -----------------------------------------------------
+
+    channel_body = {
+        "dateRanges":
+            current_date_ranges,
+
+        "dimensions": [
+            {
+                "name":
+                    "sessionDefaultChannelGroup"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name":
+                    "sessions"
+            },
+            {
+                "name":
+                    "totalUsers"
+            }
+        ],
+
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName":
+                        "sessions"
+                },
+                "desc": True
+            }
+        ],
+
+        "limit":
+            build_limit(
+                req.channelLimit
+            )
+    }
+
+    channel_response = call_ga4(
+        channel_body
+    )
+
+    channels = extract_channel_rows(
+        channel_response
+    )
+
+
+    # -----------------------------------------------------
+    # Business Questions
+    # -----------------------------------------------------
+
+    business_questions = (
+        build_business_questions(
+            kpis,
+            channels
+        )
+    )
+
+
+    # -----------------------------------------------------
+    # Insights
+    # -----------------------------------------------------
+
+    insights = []
+
+    if (
+        sessions_change is not None
+        and sessions_change >= 5
+    ):
+        insights.append(
+            "セッション数は前期間より増加しています。"
+        )
+
+    if (
+        sessions_change is not None
+        and sessions_change <= -5
+    ):
+        insights.append(
+            "セッション数が前期間より減少しています。チャネル別の確認が必要です。"
+        )
+
+    if channels:
+
+        top_channel = channels[0]
+
+        insights.append(
+            (
+                "最大流入チャネルは"
+                f"{top_channel['channel']}で、"
+                f"{top_channel['sessions']:,}"
+                "セッションです。"
+            )
+        )
+
+    unassigned = next(
+        (
+            row
+            for row in channels
+            if row["channel"]
+            == "Unassigned"
+        ),
+        None
+    )
+
+    if unassigned:
+
+        total_channel_sessions = sum(
+            row["sessions"]
+            for row in channels
+        )
+
+        if total_channel_sessions > 0:
+
+            unassigned_ratio = round(
+                (
+                    unassigned["sessions"]
+                    / total_channel_sessions
+                ) * 100,
+                1
+            )
+
+            if unassigned_ratio >= 5:
+
+                insights.append(
+                    (
+                        "Unassignedが"
+                        f"{unassigned_ratio}%"
+                        "を占めています。"
+                        "UTMやチャネル分類を確認する価値があります。"
+                    )
+                )
+
+
+    # -----------------------------------------------------
+    # Final Response
+    # -----------------------------------------------------
+
+    return {
+        "dashboard":
+            "NTEC Pulse Dashboard",
+
+        "generatedAt":
+            datetime.now().isoformat(),
+
+        "period": {
+            "current":
+                current_date_ranges[0],
+
+            "previous":
+                previous_period
+        },
+
+        "kpis":
+            kpis,
+
+        "drilldown": {
+            "channels":
+                channels
+        },
+
+        "insights":
+            insights,
+
+        "businessQuestions":
+            business_questions,
+
+        "lineage": {
+            "ga4": {
+                "source":
+                    "Google Analytics Data API",
+
+                "propertyId":
+                    GA4_PROPERTY_ID,
+
+                "dimensions": [
+                    "sessionDefaultChannelGroup"
+                ],
+
+                "metrics": [
+                    "sessions",
+                    "totalUsers",
+                    "screenPageViews",
+                    "engagedSessions"
+                ]
+            },
+
+            "bigQuery": {
+                "source":
+                    "GA4 BigQuery Export",
+
+                "project":
+                    BIGQUERY_PROJECT_ID,
+
+                "dataset":
+                    BIGQUERY_DATASET,
+
+                "availableDrilldowns": [
+                    "/api/bq/page/pre-pages",
+                    "/api/bq/conversion/pre-pages",
+                    "/api/bq/user/path"
+                ]
+            }
+        }
+    }
