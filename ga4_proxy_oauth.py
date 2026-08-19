@@ -884,6 +884,113 @@ def build_business_questions(
 
     return questions[:6]
 
+def build_channel_comparison(
+    current_channels: list,
+    previous_channels: list
+):
+    current_map = {
+        row["channel"]: row
+        for row in current_channels
+    }
+
+    previous_map = {
+        row["channel"]: row
+        for row in previous_channels
+    }
+
+    all_channels = set(
+        current_map.keys()
+    ) | set(
+        previous_map.keys()
+    )
+
+    result = []
+
+    for channel in all_channels:
+        current = current_map.get(
+            channel,
+            {
+                "sessions": 0,
+                "users": 0
+            }
+        )
+
+        previous = previous_map.get(
+            channel,
+            {
+                "sessions": 0,
+                "users": 0
+            }
+        )
+
+        current_sessions = current.get(
+            "sessions",
+            0
+        )
+
+        previous_sessions = previous.get(
+            "sessions",
+            0
+        )
+
+        current_users = current.get(
+            "users",
+            0
+        )
+
+        previous_users = previous.get(
+            "users",
+            0
+        )
+
+        sessions_change = percent_change(
+            current_sessions,
+            previous_sessions
+        )
+
+        users_change = percent_change(
+            current_users,
+            previous_users
+        )
+
+        result.append(
+            {
+                "channel": channel,
+
+                "currentSessions":
+                    current_sessions,
+
+                "previousSessions":
+                    previous_sessions,
+
+                "sessionsChangePercent":
+                    sessions_change,
+
+                "currentUsers":
+                    current_users,
+
+                "previousUsers":
+                    previous_users,
+
+                "usersChangePercent":
+                    users_change,
+
+                "status":
+                    health_from_change(
+                        sessions_change
+                    )
+            }
+        )
+
+    result.sort(
+        key=lambda x: x[
+            "currentSessions"
+        ],
+        reverse=True
+    )
+
+    return result
+
 # =========================================================
 # Request Models
 # =========================================================
@@ -2963,6 +3070,54 @@ def dashboard_summary(
     )
 
 
+    channel_comparison = (
+    build_channel_comparison(
+        channels,
+        previous_channels
+    )
+)
+    previous_channel_body = {
+    "dateRanges": [
+        previous_period
+    ],
+
+    "dimensions": [
+        {
+            "name": "sessionDefaultChannelGroup"
+        }
+    ],
+
+    "metrics": [
+        {
+            "name": "sessions"
+        },
+        {
+            "name": "totalUsers"
+        }
+    ],
+
+    "orderBys": [
+        {
+            "metric": {
+                "metricName": "sessions"
+            },
+            "desc": True
+        }
+    ],
+
+    "limit": build_limit(
+        req.channelLimit
+    )
+}
+
+previous_channel_response = call_ga4(
+    previous_channel_body
+)
+
+previous_channels = extract_channel_rows(
+    previous_channel_response
+)
+
     # -----------------------------------------------------
     # Business Questions
     # -----------------------------------------------------
@@ -3071,10 +3226,11 @@ def dashboard_summary(
         "kpis":
             kpis,
 
-        "drilldown": {
-            "channels":
-                channels
-        },
+      "drilldown": {
+    "channels": channels,
+    "channelComparison":
+        channel_comparison
+},
 
         "insights":
             insights,
