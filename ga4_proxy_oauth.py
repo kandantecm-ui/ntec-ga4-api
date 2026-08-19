@@ -1113,6 +1113,12 @@ class ExitPagesRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
+class ColumnRankingRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = Field(default=30, ge=1, le=365)
+    limit: int = Field(default=20, ge=1, le=100)
+
 # =========================================================
 # BigQuery Request Models
 # =========================================================
@@ -1209,6 +1215,62 @@ def health():
         "version": "20260819-1"
     }
 
+
+# =========================================================
+# GA4: Column Ranking
+# =========================================================
+
+@app.post("/api/ga4/column/ranking")
+def column_ranking(
+    req: ColumnRankingRequest
+):
+    body = {
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
+        "dimensions": [
+            {
+                "name": "pagePath"
+            },
+            {
+                "name": "pageTitle"
+            }
+        ],
+        "metrics": [
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "totalUsers"
+            },
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "engagedSessions"
+            }
+        ],
+        "dimensionFilter":
+            build_string_filter(
+                field_name="pagePath",
+                value="/column/",
+                match_type="CONTAINS"
+            ),
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName":
+                        "screenPageViews"
+                },
+                "desc": True
+            }
+        ],
+        "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
 
 # =========================================================
 # GA4: Channel Report
