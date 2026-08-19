@@ -2725,23 +2725,18 @@ def search_console_keywords(
 def dashboard_summary(
     req: DashboardSummaryRequest
 ):
-
     # -----------------------------------------------------
     # Current period
     # -----------------------------------------------------
 
-    current_date_ranges = (
-        build_date_ranges(
-            req.startDate,
-            req.endDate,
-            req.days
-        )
+    current_date_ranges = build_date_ranges(
+        req.startDate,
+        req.endDate,
+        req.days
     )
 
     current_overview_body = {
-        "dateRanges":
-            current_date_ranges,
-
+        "dateRanges": current_date_ranges,
         "metrics": [
             {
                 "name": "sessions"
@@ -2762,24 +2757,20 @@ def dashboard_summary(
         current_overview_body
     )
 
-
     # -----------------------------------------------------
     # Previous period
     # -----------------------------------------------------
 
-    previous_period = (
-        calculate_previous_period(
-            req.startDate,
-            req.endDate,
-            req.days
-        )
+    previous_period = calculate_previous_period(
+        req.startDate,
+        req.endDate,
+        req.days
     )
 
     previous_overview_body = {
         "dateRanges": [
             previous_period
         ],
-
         "metrics": [
             {
                 "name": "sessions"
@@ -2799,7 +2790,6 @@ def dashboard_summary(
     previous_overview = call_ga4(
         previous_overview_body
     )
-
 
     # -----------------------------------------------------
     # Current metrics
@@ -2833,7 +2823,6 @@ def dashboard_summary(
         )
     )
 
-
     # -----------------------------------------------------
     # Previous metrics
     # -----------------------------------------------------
@@ -2866,7 +2855,6 @@ def dashboard_summary(
         )
     )
 
-
     # -----------------------------------------------------
     # Changes
     # -----------------------------------------------------
@@ -2891,139 +2879,77 @@ def dashboard_summary(
         previous_engaged
     )
 
-
     # -----------------------------------------------------
     # KPI Object
     # -----------------------------------------------------
 
     kpis = {
         "sessions": {
-            "label":
-                "Sessions",
-
-            "value":
-                current_sessions,
-
-            "previousValue":
-                previous_sessions,
-
-            "changePercent":
-                sessions_change,
-
-            "status":
-                health_from_change(
-                    sessions_change
-                ),
-
+            "label": "Sessions",
+            "value": current_sessions,
+            "previousValue": previous_sessions,
+            "changePercent": sessions_change,
+            "status": health_from_change(
+                sessions_change
+            ),
             "lineage": {
-                "source":
-                    "GA4 Data API",
-
-                "metric":
-                    "sessions",
-
-                "endpoint":
-                    "/api/dashboard/summary"
+                "source": "GA4 Data API",
+                "metric": "sessions",
+                "endpoint": "/api/dashboard/summary"
             }
         },
 
         "users": {
-            "label":
-                "Users",
-
-            "value":
-                current_users,
-
-            "previousValue":
-                previous_users,
-
-            "changePercent":
-                users_change,
-
-            "status":
-                health_from_change(
-                    users_change
-                ),
-
+            "label": "Users",
+            "value": current_users,
+            "previousValue": previous_users,
+            "changePercent": users_change,
+            "status": health_from_change(
+                users_change
+            ),
             "lineage": {
-                "source":
-                    "GA4 Data API",
-
-                "metric":
-                    "totalUsers",
-
-                "endpoint":
-                    "/api/dashboard/summary"
+                "source": "GA4 Data API",
+                "metric": "totalUsers",
+                "endpoint": "/api/dashboard/summary"
             }
         },
 
         "pageViews": {
-            "label":
-                "Page Views",
-
-            "value":
-                current_pageviews,
-
-            "previousValue":
-                previous_pageviews,
-
-            "changePercent":
-                pageviews_change,
-
-            "status":
-                health_from_change(
-                    pageviews_change
-                ),
-
+            "label": "Page Views",
+            "value": current_pageviews,
+            "previousValue": previous_pageviews,
+            "changePercent": pageviews_change,
+            "status": health_from_change(
+                pageviews_change
+            ),
             "lineage": {
-                "source":
-                    "GA4 Data API",
-
-                "metric":
-                    "screenPageViews",
-
-                "endpoint":
-                    "/api/dashboard/summary"
+                "source": "GA4 Data API",
+                "metric": "screenPageViews",
+                "endpoint": "/api/dashboard/summary"
             }
         },
 
         "engagedSessions": {
-            "label":
-                "Engaged Sessions",
-
-            "value":
-                current_engaged,
-
-            "previousValue":
-                previous_engaged,
-
-            "changePercent":
-                engaged_change,
-
-            "status":
-                health_from_change(
-                    engaged_change
-                ),
-
+            "label": "Engaged Sessions",
+            "value": current_engaged,
+            "previousValue": previous_engaged,
+            "changePercent": engaged_change,
+            "status": health_from_change(
+                engaged_change
+            ),
             "lineage": {
-                "source":
-                    "GA4 Data API",
-
-                "metric":
-                    "engagedSessions",
-
-                "endpoint":
-                    "/api/dashboard/summary"
+                "source": "GA4 Data API",
+                "metric": "engagedSessions",
+                "endpoint": "/api/dashboard/summary"
             }
         }
     }
 
-
     # -----------------------------------------------------
-    # Channel Drilldown
+    # Current Channel Drilldown
     # -----------------------------------------------------
 
-       channel_body = {
+    channel_body = {
         "dateRanges": current_date_ranges,
 
         "dimensions": [
@@ -3063,6 +2989,9 @@ def dashboard_summary(
         channel_response
     )
 
+    # -----------------------------------------------------
+    # Previous Channel Drilldown
+    # -----------------------------------------------------
 
     previous_channel_body = {
         "dateRanges": [
@@ -3106,23 +3035,23 @@ def dashboard_summary(
         previous_channel_response
     )
 
-    channel_comparison = (
-        build_channel_comparison(
-            channels,
-            previous_channels
-        )
+    # -----------------------------------------------------
+    # Channel Comparison
+    # -----------------------------------------------------
+
+    channel_comparison = build_channel_comparison(
+        channels,
+        previous_channels
     )
+
     # -----------------------------------------------------
     # Business Questions
     # -----------------------------------------------------
 
-    business_questions = (
-        build_business_questions(
-            kpis,
-            channels
-        )
+    business_questions = build_business_questions(
+        kpis,
+        channels
     )
-
 
     # -----------------------------------------------------
     # Insights
@@ -3143,11 +3072,11 @@ def dashboard_summary(
         and sessions_change <= -5
     ):
         insights.append(
-            "セッション数が前期間より減少しています。チャネル別の確認が必要です。"
+            "セッション数が前期間より減少しています。"
+            "チャネル別の確認が必要です。"
         )
 
     if channels:
-
         top_channel = channels[0]
 
         insights.append(
@@ -3163,21 +3092,18 @@ def dashboard_summary(
         (
             row
             for row in channels
-            if row["channel"]
-            == "Unassigned"
+            if row["channel"] == "Unassigned"
         ),
         None
     )
 
     if unassigned:
-
         total_channel_sessions = sum(
             row["sessions"]
             for row in channels
         )
 
         if total_channel_sessions > 0:
-
             unassigned_ratio = round(
                 (
                     unassigned["sessions"]
@@ -3187,7 +3113,6 @@ def dashboard_summary(
             )
 
             if unassigned_ratio >= 5:
-
                 insights.append(
                     (
                         "Unassignedが"
@@ -3197,48 +3122,97 @@ def dashboard_summary(
                     )
                 )
 
+    # -----------------------------------------------------
+    # Channel Comparison Insights
+    # -----------------------------------------------------
+
+    biggest_declines = [
+        row
+        for row in channel_comparison
+        if (
+            row.get("sessionsChangePercent")
+            is not None
+            and row["sessionsChangePercent"] <= -5
+        )
+    ]
+
+    biggest_declines.sort(
+        key=lambda row: row[
+            "sessionsChangePercent"
+        ]
+    )
+
+    if biggest_declines:
+        decline = biggest_declines[0]
+
+        insights.append(
+            (
+                f"{decline['channel']}は"
+                f"前期間比"
+                f"{decline['sessionsChangePercent']}%"
+                "で、主要な減少チャネルの一つです。"
+            )
+        )
+
+    biggest_growth = [
+        row
+        for row in channel_comparison
+        if (
+            row.get("sessionsChangePercent")
+            is not None
+            and row["sessionsChangePercent"] >= 5
+        )
+    ]
+
+    biggest_growth.sort(
+        key=lambda row: row[
+            "sessionsChangePercent"
+        ],
+        reverse=True
+    )
+
+    if biggest_growth:
+        growth = biggest_growth[0]
+
+        insights.append(
+            (
+                f"{growth['channel']}は"
+                f"前期間比+"
+                f"{growth['sessionsChangePercent']}%"
+                "で伸びています。"
+            )
+        )
 
     # -----------------------------------------------------
     # Final Response
     # -----------------------------------------------------
 
     return {
-        "dashboard":
-            "NTEC Pulse Dashboard",
+        "dashboard": "NTEC Pulse Dashboard",
 
-        "generatedAt":
-            datetime.now().isoformat(),
+        "generatedAt": datetime.now().isoformat(),
 
         "period": {
-            "current":
-                current_date_ranges[0],
-
-            "previous":
-                previous_period
+            "current": current_date_ranges[0],
+            "previous": previous_period
         },
 
-        "kpis":
-            kpis,
+        "kpis": kpis,
 
-      "drilldown": {
-    "channels": channels,
-    "channelComparison":
-        channel_comparison
-},
+        "drilldown": {
+            "channels": channels,
+            "channelComparison": channel_comparison
+        },
 
-        "insights":
-            insights,
+        "insights": insights,
 
-        "businessQuestions":
-            business_questions,
+        "businessQuestions": business_questions,
 
         "lineage": {
             "ga4": {
-                "source":
-                    "Google Analytics Data API",
+                "source": "Google Analytics Data API",
 
-                "propertyId":
-                    GA4_PROPERTY_ID,
+                "propertyId": GA4_PROPERTY_ID,
 
                 "dimensions": [
                     "sessionDefaultChannelGroup"
@@ -3253,14 +3227,11 @@ def dashboard_summary(
             },
 
             "bigQuery": {
-                "source":
-                    "GA4 BigQuery Export",
+                "source": "GA4 BigQuery Export",
 
-                "project":
-                    BIGQUERY_PROJECT_ID,
+                "project": BIGQUERY_PROJECT_ID,
 
-                "dataset":
-                    BIGQUERY_DATASET,
+                "dataset": BIGQUERY_DATASET,
 
                 "availableDrilldowns": [
                     "/api/bq/page/pre-pages",
