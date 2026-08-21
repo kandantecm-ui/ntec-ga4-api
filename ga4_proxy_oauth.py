@@ -15,7 +15,7 @@ import json
 
 
 app = FastAPI(
-    title="NTEC Analytics API",
+    title="NTEC Analytics API",f
     version="2026.08.19"
 )
 
@@ -2338,6 +2338,9 @@ def page_performance_report(
             if dimensions
             else ""
         )
+
+        if page_path != "/":
+    page_path = page_path.rstrip("/")
 
         conversions = (
             safe_int(
