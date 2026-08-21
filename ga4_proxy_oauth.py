@@ -1185,6 +1185,11 @@ class ColumnRankingRequest(BaseModel):
     days: int = Field(default=30, ge=1, le=365)
     limit: int = Field(default=20, ge=1, le=100)
 
+class KeywordSearchVolumeRequest(BaseModel):
+    keywords: list[str]
+    languageId: str = "1005"
+    geoTargetConstant: str = "geoTargetConstants/20636"
+
 # =========================================================
 # BigQuery Request Models
 # =========================================================
@@ -1246,6 +1251,115 @@ class ConversionPrePagesRequest(BaseModel):
         default_factory=list
     )
 
+# =========================================================
+# Google Ads: Keyword Search Volume
+# =========================================================
+
+@app.post("/api/google-ads/keyword/search-volume")
+def keyword_search_volume(
+    req: KeywordSearchVolumeRequest
+):
+    try:
+        client = get_google_ads_client()
+
+        service = client.get_service(
+            "KeywordPlanIdeaService"
+        )
+
+        request = client.get_type(
+            "GenerateKeywordHistoricalMetricsRequest"
+        )
+
+        request.customer_id = (
+            GOOGLE_ADS_CUSTOMER_ID.replace("-", "")
+        )
+
+        request.keywords.extend(
+            req.keywords
+        )
+
+        request.language = (
+            f"languageConstants/{req.languageId}"
+        )
+
+        request.geo_target_constants.append(
+            req.geoTargetConstant
+        )
+
+        request.keyword_plan_network = (
+            client.enums.KeywordPlanNetworkEnum.GOOGLE_SEARCH
+        )
+
+        response = (
+            service.generate_keyword_historical_metrics(
+                request=request
+            )
+        )
+
+        rows = []
+
+        for result in response.results:
+            metrics = result.keyword_metrics
+
+            monthly = []
+
+            for item in metrics.monthly_search_volumes:
+                monthly.append(
+                    {
+                        "year": item.year.name,
+                        "month": item.month.name,
+                        "monthlySearches":
+                            item.monthly_searches
+                    }
+                )
+
+            rows.append(
+                {
+                    "keyword":
+                        result.text,
+
+                    "avgMonthlySearches":
+                        metrics.avg_monthly_searches,
+
+                    "competition":
+                        metrics.competition.name,
+
+                    "competitionIndex":
+                        metrics.competition_index,
+
+                    "lowTopOfPageBidMicros":
+                        metrics.low_top_of_page_bid_micros,
+
+                    "highTopOfPageBidMicros":
+                        metrics.high_top_of_page_bid_micros,
+
+                    "monthlySearchVolumes":
+                        monthly
+                }
+            )
+
+        return {
+            "count": len(rows),
+            "rows": rows
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            "=== GOOGLE ADS KEYWORD ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Google Ads keyword search volume failed: "
+                f"{str(e)}"
+            )
+        )
 
 # =========================================================
 # Search Console Request Models
