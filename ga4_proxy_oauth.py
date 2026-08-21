@@ -1168,6 +1168,20 @@ class LandingPageConversionRequest(BaseModel):
         le=500
     )
 
+class CampaignReportRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365
+    )
+    eventName: str = "generate_lead"
+    limit: int = Field(
+        default=100,
+        ge=1,
+        le=500
+    )
 
 class ConversionSummaryRequest(BaseModel):
     startDate: Optional[str] = None
@@ -1930,6 +1944,256 @@ def landing_page_conversion(
 
     return call_ga4(body)
 
+
+# =========================================================
+# GA4: Campaign Report
+# =========================================================
+
+@app.post(
+    "/api/ga4/acquisition/campaigns"
+)
+def campaign_report(
+    req: CampaignReportRequest
+):
+    date_ranges = build_date_ranges(
+        req.startDate,
+        req.endDate,
+        req.days
+    )
+
+    # -----------------------------------------------------
+    # Traffic
+    # -----------------------------------------------------
+
+    traffic_body = {
+        "dateRanges": date_ranges,
+
+        "dimensions": [
+            {
+                "name": "sessionSource"
+            },
+            {
+                "name": "sessionMedium"
+            },
+            {
+                "name": "sessionCampaignName"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            }
+        ],
+
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName": "sessions"
+                },
+                "desc": True
+            }
+        ],
+
+        "limit": build_limit(
+            req.limit
+        )
+    }
+
+    traffic_response = call_ga4(
+        traffic_body
+    )
+
+    # -----------------------------------------------------
+    # Conversions
+    # -----------------------------------------------------
+
+    conversion_body = {
+        "dateRanges": date_ranges,
+
+        "dimensions": [
+            {
+                "name": "sessionSource"
+            },
+            {
+                "name": "sessionMedium"
+            },
+            {
+                "name": "sessionCampaignName"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name": "eventCount"
+            }
+        ],
+
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            ),
+
+        "limit": build_limit(
+            req.limit
+        )
+    }
+
+    conversion_response = call_ga4(
+        conversion_body
+    )
+
+    # -----------------------------------------------------
+    # Build Conversion Map
+    # -----------------------------------------------------
+
+    conversion_map = {}
+
+    for row in conversion_response.get(
+        "rows",
+        []
+    ):
+        dimensions = row.get(
+            "dimensionValues",
+            []
+        )
+
+        metrics = row.get(
+            "metricValues",
+            []
+        )
+
+        source = (
+            dimensions[0].get("value", "")
+            if len(dimensions) > 0
+            else ""
+        )
+
+        medium = (
+            dimensions[1].get("value", "")
+            if len(dimensions) > 1
+            else ""
+        )
+
+        campaign = (
+            dimensions[2].get("value", "")
+            if len(dimensions) > 2
+            else ""
+        )
+
+        conversions = (
+            safe_int(
+                metrics[0].get("value", 0)
+            )
+            if metrics
+            else 0
+        )
+
+        conversion_map[
+            (
+                source,
+                medium,
+                campaign
+            )
+        ] = conversions
+
+    # -----------------------------------------------------
+    # Merge
+    # -----------------------------------------------------
+
+    rows = []
+
+    for row in traffic_response.get(
+        "rows",
+        []
+    ):
+        dimensions = row.get(
+            "dimensionValues",
+            []
+        )
+
+        metrics = row.get(
+            "metricValues",
+            []
+        )
+
+        source = (
+            dimensions[0].get("value", "")
+            if len(dimensions) > 0
+            else ""
+        )
+
+        medium = (
+            dimensions[1].get("value", "")
+            if len(dimensions) > 1
+            else ""
+        )
+
+        campaign = (
+            dimensions[2].get("value", "")
+            if len(dimensions) > 2
+            else ""
+        )
+
+        sessions = (
+            safe_int(
+                metrics[0].get("value", 0)
+            )
+            if len(metrics) > 0
+            else 0
+        )
+
+        users = (
+            safe_int(
+                metrics[1].get("value", 0)
+            )
+            if len(metrics) > 1
+            else 0
+        )
+
+        conversions = conversion_map.get(
+            (
+                source,
+                medium,
+                campaign
+            ),
+            0
+        )
+
+        conversion_rate = (
+            round(
+                conversions
+                / sessions
+                * 100,
+                2
+            )
+            if sessions > 0
+            else 0
+        )
+
+        rows.append(
+            {
+                "source": source,
+                "medium": medium,
+                "campaign": campaign,
+                "sessions": sessions,
+                "users": users,
+                "conversions": conversions,
+                "conversionRate":
+                    conversion_rate
+            }
+        )
+
+    return {
+        "eventName": req.eventName,
+        "count": len(rows),
+        "rows": rows
+    }
 
 # =========================================================
 # GA4: Conversion Summary
