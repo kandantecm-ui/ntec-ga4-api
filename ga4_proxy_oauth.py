@@ -2381,7 +2381,10 @@ page_path = page_path.rstrip("/")
             if len(dimensions) > 0
             else ""
         )
-
+        
+        if page_path != "/":
+            page_path = page_path.rstrip("/")
+            
         page_title = (
             dimensions[1].get(
                 "value",
