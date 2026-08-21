@@ -1266,6 +1266,23 @@ class ConversionPrePagesRequest(BaseModel):
         default_factory=list
     )
 
+class ContentConversionContributionRequest(BaseModel):
+    targetPage: str
+    conversionPage: str = "/contact/thanks/"
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+
+    matchType: Literal[
+        "contains",
+        "exact"
+    ] = "contains"
+
+    limitUsers: int = Field(
+        default=100,
+        ge=1,
+        le=500
+    )
+    
 # =========================================================
 # Google Ads: Keyword Search Volume
 # =========================================================
@@ -3006,6 +3023,277 @@ def bq_conversion_pre_pages(
         ]
     }
 
+# =========================================================
+# BigQuery: Content Conversion Contribution
+# =========================================================
+
+@app.post(
+    "/api/bq/content/conversion-contribution"
+)
+def bq_content_conversion_contribution(
+    req: ContentConversionContributionRequest
+):
+    date_condition, date_params = (
+        build_bq_date_condition(
+            req.startDate,
+            req.endDate
+        )
+    )
+
+    if req.matchType == "exact":
+        target_condition = (
+            "page_location = @targetPage"
+        )
+
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPage",
+                "STRING",
+                req.targetPage
+            )
+        ]
+
+    else:
+        target_condition = (
+            "page_location LIKE @targetPageLike"
+        )
+
+        target_params = [
+            bigquery.ScalarQueryParameter(
+                "targetPageLike",
+                "STRING",
+                f"%{req.targetPage}%"
+            )
+        ]
+
+    sql = f"""
+    WITH page_events AS (
+      SELECT
+        user_pseudo_id,
+
+        TIMESTAMP_MICROS(
+          event_timestamp
+        ) AS event_time,
+
+        (
+          SELECT ep.value.string_value
+          FROM UNNEST(event_params) ep
+          WHERE ep.key = 'page_location'
+        ) AS page_location
+
+      FROM
+        `{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET}.events_*`
+
+      WHERE
+        {date_condition}
+
+        AND event_name = 'page_view'
+    ),
+
+    target_hits AS (
+      SELECT
+        user_pseudo_id,
+
+        MIN(event_time) AS first_target_time,
+
+        COUNT(*) AS target_page_views
+
+      FROM
+        page_events
+
+      WHERE
+        {target_condition}
+
+      GROUP BY
+        user_pseudo_id
+    ),
+
+    contribution AS (
+      SELECT
+        t.user_pseudo_id,
+
+        t.first_target_time,
+
+        t.target_page_views,
+
+        COUNTIF(
+          p.page_location LIKE @conversionPageLike
+          AND p.event_time > t.first_target_time
+        ) AS conversions_after_content,
+
+        MIN(
+          IF(
+            p.page_location LIKE @conversionPageLike
+            AND p.event_time > t.first_target_time,
+            p.event_time,
+            NULL
+          )
+        ) AS first_conversion_time
+
+      FROM
+        target_hits t
+
+      LEFT JOIN
+        page_events p
+
+      ON
+        t.user_pseudo_id
+        = p.user_pseudo_id
+
+      GROUP BY
+        t.user_pseudo_id,
+        t.first_target_time,
+        t.target_page_views
+    ),
+
+    final AS (
+      SELECT
+        *,
+
+        COUNT(*) OVER() AS target_users,
+
+        COUNTIF(
+          conversions_after_content > 0
+        ) OVER() AS converted_users,
+
+        SUM(
+          conversions_after_content
+        ) OVER() AS total_conversions_after_content
+
+      FROM
+        contribution
+    )
+
+    SELECT
+      *
+
+    FROM
+      final
+
+    ORDER BY
+      first_conversion_time DESC,
+      first_target_time DESC
+
+    LIMIT
+      @limitUsers
+    """
+
+    params = (
+        date_params
+        + target_params
+        + [
+            bigquery.ScalarQueryParameter(
+                "conversionPageLike",
+                "STRING",
+                f"%{req.conversionPage}%"
+            ),
+
+            bigquery.ScalarQueryParameter(
+                "limitUsers",
+                "INT64",
+                req.limitUsers
+            )
+        ]
+    )
+
+    rows = run_bq_query(
+        sql,
+        params
+    )
+
+    if not rows:
+        return {
+            "targetPage": req.targetPage,
+            "conversionPage":
+                req.conversionPage,
+            "targetUsers": 0,
+            "convertedUsers": 0,
+            "conversionRate": 0,
+            "conversionsAfterContent": 0,
+            "rows": []
+        }
+
+    target_users = int(
+        rows[0]["target_users"]
+    )
+
+    converted_users = int(
+        rows[0]["converted_users"]
+    )
+
+    total_conversions = int(
+        rows[0][
+            "total_conversions_after_content"
+        ] or 0
+    )
+
+    conversion_rate = (
+        round(
+            converted_users
+            / target_users
+            * 100,
+            2
+        )
+        if target_users > 0
+        else 0
+    )
+
+    return {
+        "targetPage": req.targetPage,
+
+        "conversionPage":
+            req.conversionPage,
+
+        "targetUsers":
+            target_users,
+
+        "convertedUsers":
+            converted_users,
+
+        "conversionRate":
+            conversion_rate,
+
+        "conversionsAfterContent":
+            total_conversions,
+
+        "rows": [
+            {
+                "userPseudoId":
+                    row["user_pseudo_id"],
+
+                "targetPageViews":
+                    row["target_page_views"],
+
+                "firstTargetTime":
+                    (
+                        row[
+                            "first_target_time"
+                        ].isoformat()
+                        if row[
+                            "first_target_time"
+                        ]
+                        else None
+                    ),
+
+                "conversionsAfterContent":
+                    row[
+                        "conversions_after_content"
+                    ],
+
+                "firstConversionTime":
+                    (
+                        row[
+                            "first_conversion_time"
+                        ].isoformat()
+                        if row[
+                            "first_conversion_time"
+                        ]
+                        else None
+                    )
+            }
+            for row in rows
+        ]
+    }
 
 # =========================================================
 # Search Console: Sites
