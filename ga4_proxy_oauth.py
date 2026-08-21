@@ -1183,6 +1183,21 @@ class CampaignReportRequest(BaseModel):
         le=500
     )
 
+class PagePerformanceRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365
+    )
+    eventName: str = "generate_lead"
+    limit: int = Field(
+        default=100,
+        ge=1,
+        le=500
+    )
+
 class ConversionSummaryRequest(BaseModel):
     startDate: Optional[str] = None
     endDate: Optional[str] = None
@@ -2193,6 +2208,314 @@ def campaign_report(
         "eventName": req.eventName,
         "count": len(rows),
         "rows": rows
+    }
+
+# =========================================================
+# GA4: Page Performance Report
+# =========================================================
+
+@app.post(
+    "/api/ga4/page/performance"
+)
+def page_performance_report(
+    req: PagePerformanceRequest
+):
+    date_ranges = build_date_ranges(
+        req.startDate,
+        req.endDate,
+        req.days
+    )
+
+    # -----------------------------------------------------
+    # Page performance
+    # -----------------------------------------------------
+
+    performance_body = {
+        "dateRanges": date_ranges,
+
+        "dimensions": [
+            {
+                "name": "pagePath"
+            },
+            {
+                "name": "pageTitle"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            },
+            {
+                "name": "screenPageViews"
+            },
+            {
+                "name": "engagedSessions"
+            },
+            {
+                "name": "bounceRate"
+            }
+        ],
+
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName":
+                        "screenPageViews"
+                },
+                "desc": True
+            }
+        ],
+
+        "limit": build_limit(
+            req.limit
+        )
+    }
+
+    performance_response = call_ga4(
+        performance_body
+    )
+
+    # -----------------------------------------------------
+    # Conversions by page
+    # -----------------------------------------------------
+
+    conversion_body = {
+        "dateRanges": date_ranges,
+
+        "dimensions": [
+            {
+                "name": "pagePath"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name": "eventCount"
+            }
+        ],
+
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            ),
+
+        "limit": build_limit(
+            req.limit
+        )
+    }
+
+    conversion_response = call_ga4(
+        conversion_body
+    )
+
+    conversion_map = {}
+
+    for row in conversion_response.get(
+        "rows",
+        []
+    ):
+        dimensions = row.get(
+            "dimensionValues",
+            []
+        )
+
+        metrics = row.get(
+            "metricValues",
+            []
+        )
+
+        page_path = (
+            dimensions[0].get(
+                "value",
+                ""
+            )
+            if dimensions
+            else ""
+        )
+
+        conversions = (
+            safe_int(
+                metrics[0].get(
+                    "value",
+                    0
+                )
+            )
+            if metrics
+            else 0
+        )
+
+        conversion_map[
+            page_path
+        ] = conversions
+
+    rows = []
+
+    for row in performance_response.get(
+        "rows",
+        []
+    ):
+        dimensions = row.get(
+            "dimensionValues",
+            []
+        )
+
+        metrics = row.get(
+            "metricValues",
+            []
+        )
+
+        page_path = (
+            dimensions[0].get(
+                "value",
+                ""
+            )
+            if len(dimensions) > 0
+            else ""
+        )
+
+        page_title = (
+            dimensions[1].get(
+                "value",
+                ""
+            )
+            if len(dimensions) > 1
+            else ""
+        )
+
+        sessions = (
+            safe_int(
+                metrics[0].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 0
+            else 0
+        )
+
+        users = (
+            safe_int(
+                metrics[1].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 1
+            else 0
+        )
+
+        page_views = (
+            safe_int(
+                metrics[2].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 2
+            else 0
+        )
+
+        engaged_sessions = (
+            safe_int(
+                metrics[3].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 3
+            else 0
+        )
+
+        bounce_rate = (
+            safe_float(
+                metrics[4].get(
+                    "value",
+                    0
+                )
+            )
+            if len(metrics) > 4
+            else 0
+        )
+
+        conversions = conversion_map.get(
+            page_path,
+            0
+        )
+
+        conversion_rate = (
+            round(
+                conversions
+                / sessions
+                * 100,
+                2
+            )
+            if sessions > 0
+            else 0
+        )
+
+        engagement_rate = (
+            round(
+                engaged_sessions
+                / sessions
+                * 100,
+                2
+            )
+            if sessions > 0
+            else 0
+        )
+
+        rows.append(
+            {
+                "pagePath":
+                    page_path,
+
+                "pageTitle":
+                    page_title,
+
+                "sessions":
+                    sessions,
+
+                "users":
+                    users,
+
+                "pageViews":
+                    page_views,
+
+                "engagedSessions":
+                    engaged_sessions,
+
+                "engagementRate":
+                    engagement_rate,
+
+                "bounceRate":
+                    round(
+                        bounce_rate * 100,
+                        2
+                    ),
+
+                "conversions":
+                    conversions,
+
+                "conversionRate":
+                    conversion_rate
+            }
+        )
+
+    return {
+        "eventName":
+            req.eventName,
+
+        "count":
+            len(rows),
+
+        "rows":
+            rows
     }
 
 # =========================================================
