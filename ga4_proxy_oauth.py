@@ -7,6 +7,7 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
+from google.ads.googleads.client import GoogleAdsClient
 
 import requests
 import os
@@ -34,6 +35,9 @@ BIGQUERY_PROJECT_ID = os.getenv("BIGQUERY_PROJECT_ID")
 BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
+GOOGLE_ADS_DEVELOPER_TOKEN = os.getenv("GOOGLE_ADS_DEVELOPER_TOKEN")
+GOOGLE_ADS_CUSTOMER_ID = os.getenv("GOOGLE_ADS_CUSTOMER_ID")
+GOOGLE_ADS_LOGIN_CUSTOMER_ID = os.getenv("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
 
 # =========================================================
 # OAuth
@@ -356,6 +360,68 @@ def get_search_console_service():
             )
         )
 
+# =========================================================
+# Google Ads Core
+# =========================================================
+
+def get_google_ads_client():
+
+    if not GOOGLE_ADS_DEVELOPER_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_ADS_DEVELOPER_TOKEN not set"
+        )
+
+    if not GOOGLE_ADS_CUSTOMER_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_ADS_CUSTOMER_ID not set"
+        )
+
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_CLIENT_ID not set"
+        )
+
+    if not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_CLIENT_SECRET not set"
+        )
+
+    if not GOOGLE_REFRESH_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_REFRESH_TOKEN not set"
+        )
+
+    config = {
+        "developer_token": GOOGLE_ADS_DEVELOPER_TOKEN,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "refresh_token": GOOGLE_REFRESH_TOKEN,
+        "use_proto_plus": True
+    }
+
+    if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+        config["login_customer_id"] = (
+            GOOGLE_ADS_LOGIN_CUSTOMER_ID.replace("-", "")
+        )
+
+    try:
+        client = GoogleAdsClient.load_from_dict(config)
+        return client
+
+    except Exception as e:
+        print("=== GOOGLE ADS CLIENT ERROR ===")
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Google Ads client init failed: {str(e)}"
+        )
 
 # =========================================================
 # Utils
