@@ -1375,6 +1375,16 @@ class SearchConsoleKeywordsRequest(BaseModel):
     )
     siteUrl: str = "sc-domain:ntecj.co.jp"
 
+class SearchConsolePagesRequest(BaseModel):
+    startDate: str
+    endDate: str
+    rowLimit: int = Field(
+        default=100,
+        ge=1,
+        le=1000
+    )
+    siteUrl: str = "sc-domain:ntecj.co.jp"
+
 class SearchConsoleQueryRequest(BaseModel):
     query: str
     matchType: Literal[
@@ -2976,6 +2986,102 @@ def search_console_keywords(
             )
         )
 
+# =========================================================
+# Search Console: Pages
+# =========================================================
+
+@app.post(
+    "/api/search-console/pages"
+)
+def search_console_pages(
+    req: SearchConsolePagesRequest
+):
+    service = get_search_console_service()
+
+    body = {
+        "startDate": req.startDate,
+        "endDate": req.endDate,
+        "dimensions": [
+            "page"
+        ],
+        "rowLimit": req.rowLimit
+    }
+
+    try:
+        response = (
+            service
+            .searchanalytics()
+            .query(
+                siteUrl=req.siteUrl,
+                body=body
+            )
+            .execute()
+        )
+
+        rows = []
+
+        for row in response.get(
+            "rows",
+            []
+        ):
+            keys = row.get(
+                "keys",
+                []
+            )
+
+            rows.append(
+                {
+                    "page":
+                        keys[0]
+                        if len(keys) > 0
+                        else None,
+
+                    "clicks":
+                        row.get(
+                            "clicks",
+                            0
+                        ),
+
+                    "impressions":
+                        row.get(
+                            "impressions",
+                            0
+                        ),
+
+                    "ctr":
+                        row.get(
+                            "ctr",
+                            0
+                        ),
+
+                    "position":
+                        row.get(
+                            "position",
+                            0
+                        )
+                }
+            )
+
+        return {
+            "count": len(rows),
+            "rows": rows
+        }
+
+    except Exception as e:
+
+        print(
+            "=== SEARCH CONSOLE PAGES ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Search Console pages report failed: "
+                f"{str(e)}"
+            )
+        )
 # =========================================================
 # Search Console: Query Filter
 # =========================================================
