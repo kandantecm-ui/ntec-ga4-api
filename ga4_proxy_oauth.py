@@ -1375,6 +1375,23 @@ class SearchConsoleKeywordsRequest(BaseModel):
     )
     siteUrl: str = "sc-domain:ntecj.co.jp"
 
+class SearchConsoleQueryRequest(BaseModel):
+    query: str
+    matchType: Literal[
+        "exact",
+        "contains"
+    ] = "exact"
+
+    startDate: str
+    endDate: str
+
+    rowLimit: int = Field(
+        default=100,
+        ge=1,
+        le=1000
+    )
+
+    siteUrl: str = "sc-domain:ntecj.co.jp"
 
 # =========================================================
 # Root / Health
@@ -2955,6 +2972,134 @@ def search_console_keywords(
             status_code=500,
             detail=(
                 "Search Console query failed: "
+                f"{str(e)}"
+            )
+        )
+
+# =========================================================
+# Search Console: Query Filter
+# =========================================================
+
+@app.post(
+    "/api/search-console/query"
+)
+def search_console_query(
+    req: SearchConsoleQueryRequest
+):
+    service = (
+        get_search_console_service()
+    )
+
+    operator = (
+        "equals"
+        if req.matchType == "exact"
+        else "contains"
+    )
+
+    body = {
+        "startDate": req.startDate,
+        "endDate": req.endDate,
+
+        "dimensions": [
+            "query",
+            "page"
+        ],
+
+        "dimensionFilterGroups": [
+            {
+                "groupType": "and",
+                "filters": [
+                    {
+                        "dimension": "query",
+                        "operator": operator,
+                        "expression": req.query
+                    }
+                ]
+            }
+        ],
+
+        "rowLimit": req.rowLimit
+    }
+
+    try:
+        response = (
+            service
+            .searchanalytics()
+            .query(
+                siteUrl=req.siteUrl,
+                body=body
+            )
+            .execute()
+        )
+
+        rows = []
+
+        for row in response.get(
+            "rows",
+            []
+        ):
+            keys = row.get(
+                "keys",
+                []
+            )
+
+            rows.append(
+                {
+                    "query":
+                        keys[0]
+                        if len(keys) > 0
+                        else None,
+
+                    "page":
+                        keys[1]
+                        if len(keys) > 1
+                        else None,
+
+                    "clicks":
+                        row.get(
+                            "clicks",
+                            0
+                        ),
+
+                    "impressions":
+                        row.get(
+                            "impressions",
+                            0
+                        ),
+
+                    "ctr":
+                        row.get(
+                            "ctr",
+                            0
+                        ),
+
+                    "position":
+                        row.get(
+                            "position",
+                            0
+                        )
+                }
+            )
+
+        return {
+            "query": req.query,
+            "matchType": req.matchType,
+            "count": len(rows),
+            "rows": rows
+        }
+
+    except Exception as e:
+
+        print(
+            "=== SEARCH CONSOLE QUERY FILTER ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Search Console query filter failed: "
                 f"{str(e)}"
             )
         )
