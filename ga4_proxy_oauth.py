@@ -1385,6 +1385,39 @@ class SearchConsolePagesRequest(BaseModel):
     )
     siteUrl: str = "sc-domain:ntecj.co.jp"
 
+class SeoOpportunityRequest(BaseModel):
+    startDate: str
+    endDate: str
+
+    minImpressions: int = Field(
+        default=100,
+        ge=1
+    )
+
+    minPosition: float = Field(
+        default=4.0,
+        ge=1.0
+    )
+
+    maxPosition: float = Field(
+        default=10.0,
+        ge=1.0
+    )
+
+    maxCtr: float = Field(
+        default=0.03,
+        ge=0.0,
+        le=1.0
+    )
+
+    rowLimit: int = Field(
+        default=500,
+        ge=1,
+        le=1000
+    )
+
+    siteUrl: str = "sc-domain:ntecj.co.jp"
+
 class SearchConsoleQueryRequest(BaseModel):
     query: str
     matchType: Literal[
@@ -3079,6 +3112,154 @@ def search_console_pages(
             status_code=500,
             detail=(
                 "Search Console pages report failed: "
+                f"{str(e)}"
+            )
+        )
+
+# =========================================================
+# Search Console: SEO Opportunities
+# =========================================================
+
+@app.post(
+    "/api/search-console/seo-opportunities"
+)
+def search_console_seo_opportunities(
+    req: SeoOpportunityRequest
+):
+    service = get_search_console_service()
+
+    body = {
+        "startDate": req.startDate,
+        "endDate": req.endDate,
+        "dimensions": [
+            "page"
+        ],
+        "rowLimit": req.rowLimit
+    }
+
+    try:
+        response = (
+            service
+            .searchanalytics()
+            .query(
+                siteUrl=req.siteUrl,
+                body=body
+            )
+            .execute()
+        )
+
+        rows = []
+
+        for row in response.get(
+            "rows",
+            []
+        ):
+            keys = row.get(
+                "keys",
+                []
+            )
+
+            page = (
+                keys[0]
+                if len(keys) > 0
+                else None
+            )
+
+            clicks = row.get(
+                "clicks",
+                0
+            )
+
+            impressions = row.get(
+                "impressions",
+                0
+            )
+
+            ctr = row.get(
+                "ctr",
+                0
+            )
+
+            position = row.get(
+                "position",
+                0
+            )
+
+            if impressions < req.minImpressions:
+                continue
+
+            if position < req.minPosition:
+                continue
+
+            if position > req.maxPosition:
+                continue
+
+            if ctr > req.maxCtr:
+                continue
+
+            opportunity_score = round(
+                impressions
+                * max(
+                    req.maxCtr - ctr,
+                    0
+                )
+                * max(
+                    req.maxPosition - position + 1,
+                    1
+                ),
+                2
+            )
+
+            rows.append(
+                {
+                    "page": page,
+                    "clicks": clicks,
+                    "impressions": impressions,
+                    "ctr": ctr,
+                    "position": position,
+                    "opportunityScore":
+                        opportunity_score
+                }
+            )
+
+        rows.sort(
+            key=lambda x:
+                x["opportunityScore"],
+            reverse=True
+        )
+
+        return {
+            "filters": {
+                "minImpressions":
+                    req.minImpressions,
+
+                "minPosition":
+                    req.minPosition,
+
+                "maxPosition":
+                    req.maxPosition,
+
+                "maxCtr":
+                    req.maxCtr
+            },
+
+            "count": len(rows),
+
+            "rows": rows
+        }
+
+    except Exception as e:
+
+        print(
+            "=== SEO OPPORTUNITY ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "SEO opportunity report failed: "
                 f"{str(e)}"
             )
         )
