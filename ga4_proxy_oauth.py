@@ -1153,6 +1153,21 @@ class ConversionPathRequest(BaseModel):
     ] = "pageTitle"
     limit: int = Field(default=50, ge=1, le=100)
 
+class LandingPageConversionRequest(BaseModel):
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    days: int = Field(
+        default=30,
+        ge=1,
+        le=365
+    )
+    eventName: str = "generate_lead"
+    limit: int = Field(
+        default=100,
+        ge=1,
+        le=500
+    )
+
 
 class ConversionSummaryRequest(BaseModel):
     startDate: Optional[str] = None
@@ -1832,6 +1847,68 @@ def conversion_path(
             }
         ],
         "limit": build_limit(req.limit)
+    }
+
+    return call_ga4(body)
+
+# =========================================================
+# GA4: Landing Page Conversion
+# =========================================================
+
+@app.post(
+    "/api/ga4/conversion/landing-pages"
+)
+def landing_page_conversion(
+    req: LandingPageConversionRequest
+):
+    body = {
+        "dateRanges": build_date_ranges(
+            req.startDate,
+            req.endDate,
+            req.days
+        ),
+
+        "dimensions": [
+            {
+                "name": "landingPage"
+            },
+            {
+                "name": "sessionDefaultChannelGroup"
+            }
+        ],
+
+        "metrics": [
+            {
+                "name": "sessions"
+            },
+            {
+                "name": "totalUsers"
+            },
+            {
+                "name": "eventCount"
+            }
+        ],
+
+        "dimensionFilter":
+            build_string_filter(
+                field_name="eventName",
+                value=req.eventName,
+                match_type="EXACT"
+            ),
+
+        "orderBys": [
+            {
+                "metric": {
+                    "metricName":
+                        "eventCount"
+                },
+                "desc": True
+            }
+        ],
+
+        "limit": build_limit(
+            req.limit
+        )
     }
 
     return call_ga4(body)
