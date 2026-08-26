@@ -1973,7 +1973,7 @@ def keyword_search_volume(
                 monthly.append(
                     {
                         "year":
-                            item.year.name,
+                            item.year,
 
                         "month":
                             item.month.name,
