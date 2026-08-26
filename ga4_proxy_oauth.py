@@ -1868,6 +1868,46 @@ class SearchConsoleQueryRequest(
         "sc-domain:ntecj.co.jp"
     )
 
+class KeywordOpportunityRequest(BaseModel):
+    startDate: str
+    endDate: str
+
+    minImpressions: int = Field(
+        default=10,
+        ge=1
+    )
+
+    minPosition: float = Field(
+        default=4.0,
+        ge=1.0
+    )
+
+    maxPosition: float = Field(
+        default=20.0,
+        ge=1.0
+    )
+
+    maxCtr: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0
+    )
+
+    rowLimit: int = Field(
+        default=100,
+        ge=1,
+        le=500
+    )
+
+    languageId: str = "1005"
+
+    geoTargetConstant: str = (
+        "geoTargetConstants/20636"
+    )
+
+    siteUrl: str = (
+        "sc-domain:ntecj.co.jp"
+    )
 
 # =========================================================
 # Root / Health
