@@ -1908,6 +1908,39 @@ class KeywordOpportunityRequest(BaseModel):
     siteUrl: str = (
         "sc-domain:ntecj.co.jp"
     )
+class AcquisitionOpportunitySummaryRequest(BaseModel):
+    startDate: str
+    endDate: str
+
+    eventName: str = "generate_lead"
+
+    channelLimit: int = Field(
+        default=10,
+        ge=1,
+        le=50
+    )
+
+    keywordLimit: int = Field(
+        default=20,
+        ge=1,
+        le=100
+    )
+
+    pageLimit: int = Field(
+        default=20,
+        ge=1,
+        le=100
+    )
+
+    siteUrl: str = (
+        "sc-domain:ntecj.co.jp"
+    )
+
+    languageId: str = "1005"
+
+    geoTargetConstant: str = (
+        "geoTargetConstants/20636"
+    )
 
 # =========================================================
 # Root / Health
@@ -6549,3 +6582,656 @@ def dashboard_summary(
         "businessQuestions":
             business_questions
     }
+
+# =========================================================
+# Acquisition Opportunity Summary
+# GA4 × Search Console × Google Ads
+# =========================================================
+
+@app.post(
+    "/api/acquisition/opportunity-summary"
+)
+def acquisition_opportunity_summary(
+    req: AcquisitionOpportunitySummaryRequest
+):
+
+    try:
+
+        # -------------------------------------------------
+        # 1. Dashboard Summary
+        # -------------------------------------------------
+
+        dashboard_req = (
+            DashboardSummaryRequest(
+                startDate=req.startDate,
+                endDate=req.endDate,
+                days=30,
+                channelLimit=req.channelLimit
+            )
+        )
+
+        dashboard = (
+            dashboard_summary(
+                dashboard_req
+            )
+        )
+
+        # -------------------------------------------------
+        # 2. Conversion Summary
+        # -------------------------------------------------
+
+        conversion_req = (
+            ConversionSummaryRequest(
+                startDate=req.startDate,
+                endDate=req.endDate,
+                days=30,
+                eventName=req.eventName
+            )
+        )
+
+        conversion_raw = (
+            conversion_summary(
+                conversion_req
+            )
+        )
+
+        conversions = safe_int(
+            get_metric_value(
+                conversion_raw,
+                0
+            )
+        )
+
+        # -------------------------------------------------
+        # 3. SEO Page Opportunities
+        # -------------------------------------------------
+
+        seo_req = (
+            SeoOpportunityRequest(
+                startDate=req.startDate,
+                endDate=req.endDate,
+                minImpressions=100,
+                minPosition=4.0,
+                maxPosition=10.0,
+                maxCtr=0.03,
+                rowLimit=req.pageLimit,
+                siteUrl=req.siteUrl
+            )
+        )
+
+        seo_result = (
+            search_console_seo_opportunities(
+                seo_req
+            )
+        )
+
+        seo_rows = (
+            seo_result.get(
+                "rows",
+                []
+            )[:req.pageLimit]
+        )
+
+        # -------------------------------------------------
+        # 4. Keyword Opportunities
+        # -------------------------------------------------
+
+        keyword_req = (
+            KeywordOpportunityRequest(
+                startDate=req.startDate,
+                endDate=req.endDate,
+                minImpressions=10,
+                minPosition=4.0,
+                maxPosition=20.0,
+                maxCtr=0.05,
+                rowLimit=req.keywordLimit,
+                languageId=req.languageId,
+                geoTargetConstant=(
+                    req.geoTargetConstant
+                ),
+                siteUrl=req.siteUrl
+            )
+        )
+
+        keyword_result = (
+            keyword_opportunity_report(
+                keyword_req
+            )
+        )
+
+        keyword_rows = (
+            keyword_result.get(
+                "rows",
+                []
+            )[:req.keywordLimit]
+        )
+
+        # -------------------------------------------------
+        # 5. KPI / Channel Data
+        # -------------------------------------------------
+
+        kpis = dashboard.get(
+            "kpis",
+            {}
+        )
+
+        drilldown = dashboard.get(
+            "drilldown",
+            {}
+        )
+
+        channel_comparison = (
+            drilldown.get(
+                "channelComparison",
+                []
+            )
+        )
+
+        channels = (
+            drilldown.get(
+                "channels",
+                []
+            )
+        )
+
+        # -------------------------------------------------
+        # 6. Biggest Channel Changes
+        # -------------------------------------------------
+
+        declining_channels = [
+            row
+            for row
+            in channel_comparison
+            if (
+                row.get(
+                    "sessionsChangePercent"
+                )
+                is not None
+                and row.get(
+                    "sessionsChangePercent"
+                ) < 0
+            )
+        ]
+
+        declining_channels.sort(
+            key=lambda x:
+                x.get(
+                    "sessionsChangePercent",
+                    0
+                )
+        )
+
+        growing_channels = [
+            row
+            for row
+            in channel_comparison
+            if (
+                row.get(
+                    "sessionsChangePercent"
+                )
+                is not None
+                and row.get(
+                    "sessionsChangePercent"
+                ) > 0
+            )
+        ]
+
+        growing_channels.sort(
+            key=lambda x:
+                x.get(
+                    "sessionsChangePercent",
+                    0
+                ),
+            reverse=True
+        )
+
+        # -------------------------------------------------
+        # 7. Priority Signals
+        # -------------------------------------------------
+
+        signals = []
+
+        sessions_change = (
+            kpis
+            .get(
+                "sessions",
+                {}
+            )
+            .get(
+                "changePercent"
+            )
+        )
+
+        users_change = (
+            kpis
+            .get(
+                "users",
+                {}
+            )
+            .get(
+                "changePercent"
+            )
+        )
+
+        engaged_change = (
+            kpis
+            .get(
+                "engagedSessions",
+                {}
+            )
+            .get(
+                "changePercent"
+            )
+        )
+
+        if (
+            sessions_change is not None
+            and sessions_change <= -5
+        ):
+
+            signals.append(
+                {
+                    "type":
+                        "traffic",
+
+                    "priority":
+                        "high",
+
+                    "message":
+                        (
+                            "Sessionsが前期間比で"
+                            f"{sessions_change}%減少。"
+                            "減少チャネルの確認を優先。"
+                        )
+                }
+            )
+
+        if (
+            users_change is not None
+            and users_change <= -5
+        ):
+
+            signals.append(
+                {
+                    "type":
+                        "users",
+
+                    "priority":
+                        "high",
+
+                    "message":
+                        (
+                            "Usersが前期間比で"
+                            f"{users_change}%減少。"
+                        )
+                }
+            )
+
+        if growing_channels:
+
+            top_growth = (
+                growing_channels[0]
+            )
+
+            signals.append(
+                {
+                    "type":
+                        "channel-growth",
+
+                    "priority":
+                        "medium",
+
+                    "message":
+                        (
+                            f"{top_growth['channel']}"
+                            "が最も伸びており、"
+                            f"Sessionsは前期間比"
+                            f"{top_growth['sessionsChangePercent']}%。"
+                        )
+                }
+            )
+
+        if declining_channels:
+
+            top_decline = (
+                declining_channels[0]
+            )
+
+            signals.append(
+                {
+                    "type":
+                        "channel-decline",
+
+                    "priority":
+                        "high",
+
+                    "message":
+                        (
+                            f"{top_decline['channel']}"
+                            "が最も減少しており、"
+                            f"Sessionsは前期間比"
+                            f"{top_decline['sessionsChangePercent']}%。"
+                        )
+                }
+            )
+
+        unassigned = next(
+            (
+                row
+                for row in channels
+                if row.get(
+                    "channel"
+                ) == "Unassigned"
+            ),
+            None
+        )
+
+        if unassigned:
+
+            total_channel_sessions = sum(
+                row.get(
+                    "sessions",
+                    0
+                )
+                for row
+                in channels
+            )
+
+            if total_channel_sessions > 0:
+
+                unassigned_ratio = round(
+                    (
+                        unassigned.get(
+                            "sessions",
+                            0
+                        )
+                        / total_channel_sessions
+                    )
+                    * 100,
+                    1
+                )
+
+                if unassigned_ratio >= 5:
+
+                    signals.append(
+                        {
+                            "type":
+                                "measurement",
+
+                            "priority":
+                                "high",
+
+                            "message":
+                                (
+                                    "Unassignedが"
+                                    f"{unassigned_ratio}%"
+                                    "を占めるため、"
+                                    "UTM・参照元分類・"
+                                    "GA4設定を確認。"
+                                )
+                        }
+                    )
+
+        if conversions == 0:
+
+            signals.append(
+                {
+                    "type":
+                        "conversion",
+
+                    "priority":
+                        "high",
+
+                    "message":
+                        (
+                            f"{req.eventName}が0件。"
+                            "流入増減だけでなく、"
+                            "CV計測・導線の確認が必要。"
+                        )
+                }
+            )
+
+        if seo_rows:
+
+            top_page = (
+                seo_rows[0]
+            )
+
+            signals.append(
+                {
+                    "type":
+                        "seo-page",
+
+                    "priority":
+                        "medium",
+
+                    "message":
+                        (
+                            "SEO改善優先ページ候補: "
+                            f"{top_page.get('page')}"
+                        )
+                }
+            )
+
+        if keyword_rows:
+
+            top_keyword = (
+                keyword_rows[0]
+            )
+
+            signals.append(
+                {
+                    "type":
+                        "keyword",
+
+                    "priority":
+                        "medium",
+
+                    "message":
+                        (
+                            "キーワード機会上位: "
+                            f"{top_keyword.get('query')} "
+                            "（検索ボリューム "
+                            f"{top_keyword.get('avgMonthlySearches', 0)}）"
+                        )
+                }
+            )
+
+        # -------------------------------------------------
+        # 8. Recommended Actions
+        # -------------------------------------------------
+
+        actions = []
+
+        if declining_channels:
+
+            actions.append(
+                {
+                    "priority":
+                        1,
+
+                    "action":
+                        (
+                            "減少幅の大きいチャネルを"
+                            "流入元・キャンペーン単位で確認する"
+                        ),
+
+                    "recommendedEndpoint":
+                        "/api/ga4/acquisition/campaigns"
+                }
+            )
+
+        if keyword_rows:
+
+            actions.append(
+                {
+                    "priority":
+                        2,
+
+                    "action":
+                        (
+                            "上位Keyword Opportunityについて"
+                            "検索意図と事業関連性を確認し、"
+                            "既存ページ改善または記事企画を行う"
+                        ),
+
+                    "recommendedEndpoint":
+                        "/api/keyword/opportunities"
+                }
+            )
+
+        if seo_rows:
+
+            actions.append(
+                {
+                    "priority":
+                        3,
+
+                    "action":
+                        (
+                            "表示回数が多くCTRの低いページを"
+                            "タイトル・ディスクリプション・"
+                            "コンテンツ面から改善する"
+                        ),
+
+                    "recommendedEndpoint":
+                        (
+                            "/api/search-console/"
+                            "seo-opportunities"
+                        )
+                }
+            )
+
+        if conversions == 0:
+
+            actions.insert(
+                0,
+                {
+                    "priority":
+                        1,
+
+                    "action":
+                        (
+                            "コンバージョン計測と"
+                            "Thanksページ到達状況を確認する"
+                        ),
+
+                    "recommendedEndpoint":
+                        (
+                            "/api/ga4/conversion/"
+                            "thanks-summary"
+                        )
+                }
+            )
+
+        # priorityを振り直す
+        for index, action in enumerate(
+            actions[:5],
+            start=1
+        ):
+            action["priority"] = index
+
+        # -------------------------------------------------
+        # 9. Final Response
+        # -------------------------------------------------
+
+        return {
+            "report":
+                "NTEC Acquisition Opportunity Summary",
+
+            "generatedAt":
+                datetime.now().isoformat(),
+
+            "period": {
+                "startDate":
+                    req.startDate,
+
+                "endDate":
+                    req.endDate
+            },
+
+            "eventName":
+                req.eventName,
+
+            "kpis":
+                kpis,
+
+            "conversions": {
+                "eventName":
+                    req.eventName,
+
+                "eventCount":
+                    conversions
+            },
+
+            "channels": {
+                "current":
+                    channels[
+                        :req.channelLimit
+                    ],
+
+                "comparison":
+                    channel_comparison[
+                        :req.channelLimit
+                    ],
+
+                "topGrowth":
+                    growing_channels[:3],
+
+                "topDecline":
+                    declining_channels[:3]
+            },
+
+            "seoOpportunities": {
+                "count":
+                    len(seo_rows),
+
+                "rows":
+                    seo_rows
+            },
+
+            "keywordOpportunities": {
+                "count":
+                    len(keyword_rows),
+
+                "rows":
+                    keyword_rows
+            },
+
+            "signals":
+                signals[:10],
+
+            "recommendedActions":
+                actions[:5],
+
+            "sourceEndpoints": [
+                "/api/dashboard/summary",
+                "/api/ga4/conversion/summary",
+                (
+                    "/api/search-console/"
+                    "seo-opportunities"
+                ),
+                "/api/keyword/opportunities"
+            ]
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "=== ACQUISITION OPPORTUNITY "
+            "SUMMARY ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Acquisition opportunity "
+                "summary failed: "
+                f"{str(e)}"
+            )
+        )
