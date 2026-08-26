@@ -6710,30 +6710,25 @@ def acquisition_opportunity_summary(
         # 5. KPI / Channel Data
         # -------------------------------------------------
 
-        kpis = dashboard.get(
-            "kpis",
-            {}
-        )
+kpis = dashboard.get(
+    "kpis",
+    {}
+)
 
-        drilldown = dashboard.get(
-            "drilldown",
-            {}
-        )
+channel_comparison = (
+    dashboard.get(
+        "channelComparison",
+        []
+    )
+)
 
-        channel_comparison = (
-            drilldown.get(
-                "channelComparison",
-                []
-            )
-        )
-
-        channels = (
-            drilldown.get(
-                "channels",
-                []
-            )
-        )
-
+channels = (
+    dashboard.get(
+        "channels",
+        []
+    )
+)
+ 
         # -------------------------------------------------
         # 6. Biggest Channel Changes
         # -------------------------------------------------
