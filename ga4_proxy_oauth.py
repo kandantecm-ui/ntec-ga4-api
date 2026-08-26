@@ -6720,22 +6720,25 @@ def acquisition_opportunity_summary(
             {}
         )
 
-        channel_comparison = (
-            drilldown.get(
-                "channelComparison",
-                []
-            )
-        )
-
         channels = (
-            drilldown.get(
+            dashboard.get(
+                "channels"
+            )
+            or drilldown.get(
                 "channels",
                 []
             )
         )
 
-　
- 
+        channel_comparison = (
+            dashboard.get(
+                "channelComparison"
+            )
+            or drilldown.get(
+                "channelComparison",
+                []
+            )
+        )
         # -------------------------------------------------
         # 6. Biggest Channel Changes
         # -------------------------------------------------
