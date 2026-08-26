@@ -5403,6 +5403,446 @@ def search_console_seo_opportunities(
             )
         )
 
+# =========================================================
+# Keyword Opportunity Report
+# Search Console × Google Ads Keyword Planner
+# =========================================================
+
+@app.post(
+    "/api/keyword/opportunities"
+)
+def keyword_opportunity_report(
+    req: KeywordOpportunityRequest
+):
+
+    # -----------------------------------------------------
+    # 1. Search Console queries
+    # -----------------------------------------------------
+
+    service = (
+        get_search_console_service()
+    )
+
+    sc_body = {
+        "startDate":
+            req.startDate,
+
+        "endDate":
+            req.endDate,
+
+        "dimensions": [
+            "query",
+            "page"
+        ],
+
+        "rowLimit":
+            req.rowLimit
+    }
+
+    try:
+        sc_response = (
+            service
+            .searchanalytics()
+            .query(
+                siteUrl=req.siteUrl,
+                body=sc_body
+            )
+            .execute()
+        )
+
+    except Exception as e:
+
+        print(
+            "=== KEYWORD OPPORTUNITY "
+            "SEARCH CONSOLE ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Keyword opportunity "
+                "Search Console fetch failed: "
+                f"{str(e)}"
+            )
+        )
+
+    candidates = []
+
+    for row in sc_response.get(
+        "rows",
+        []
+    ):
+
+        keys = row.get(
+            "keys",
+            []
+        )
+
+        query = (
+            keys[0]
+            if len(keys) > 0
+            else None
+        )
+
+        page = (
+            keys[1]
+            if len(keys) > 1
+            else None
+        )
+
+        clicks = row.get(
+            "clicks",
+            0
+        )
+
+        impressions = row.get(
+            "impressions",
+            0
+        )
+
+        ctr = row.get(
+            "ctr",
+            0
+        )
+
+        position = row.get(
+            "position",
+            0
+        )
+
+        if not query:
+            continue
+
+        if impressions < req.minImpressions:
+            continue
+
+        if position < req.minPosition:
+            continue
+
+        if position > req.maxPosition:
+            continue
+
+        if ctr > req.maxCtr:
+            continue
+
+        candidates.append(
+            {
+                "query":
+                    query,
+
+                "page":
+                    page,
+
+                "clicks":
+                    clicks,
+
+                "impressions":
+                    impressions,
+
+                "ctr":
+                    ctr,
+
+                "position":
+                    position
+            }
+        )
+
+    if not candidates:
+
+        return {
+            "count":
+                0,
+
+            "rows":
+                []
+        }
+
+    # -----------------------------------------------------
+    # 2. Google Ads keyword volume
+    # -----------------------------------------------------
+
+    keywords = list(
+        dict.fromkeys(
+            row["query"]
+            for row in candidates
+        )
+    )
+
+    try:
+        client = (
+            get_google_ads_client()
+        )
+
+        service_ads = (
+            client.get_service(
+                "KeywordPlanIdeaService"
+            )
+        )
+
+        request = client.get_type(
+            (
+                "GenerateKeywordHistorical"
+                "MetricsRequest"
+            )
+        )
+
+        request.customer_id = (
+            GOOGLE_ADS_CUSTOMER_ID
+            .replace("-", "")
+        )
+
+        request.keywords.extend(
+            keywords
+        )
+
+        request.language = (
+            "languageConstants/"
+            f"{req.languageId}"
+        )
+
+        request.geo_target_constants.append(
+            req.geoTargetConstant
+        )
+
+        request.keyword_plan_network = (
+            client
+            .enums
+            .KeywordPlanNetworkEnum
+            .GOOGLE_SEARCH
+        )
+
+        ads_response = (
+            service_ads
+            .generate_keyword_historical_metrics(
+                request=request
+            )
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print(
+            "=== KEYWORD OPPORTUNITY "
+            "GOOGLE ADS ERROR ==="
+        )
+        print(type(e).__name__)
+        print(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Keyword opportunity "
+                "Google Ads fetch failed: "
+                f"{str(e)}"
+            )
+        )
+
+    # -----------------------------------------------------
+    # 3. Build Ads map
+    # -----------------------------------------------------
+
+    ads_map = {}
+
+    for result in ads_response.results:
+
+        metrics = (
+            result.keyword_metrics
+        )
+
+        keyword_key = (
+            result.text
+            .replace(" ", "")
+            .lower()
+        )
+
+        ads_map[
+            keyword_key
+        ] = {
+            "avgMonthlySearches":
+                (
+                    metrics
+                    .avg_monthly_searches
+                ),
+
+            "competition":
+                metrics.competition.name,
+
+            "competitionIndex":
+                metrics.competition_index,
+
+            "lowTopOfPageBidMicros":
+                (
+                    metrics
+                    .low_top_of_page_bid_micros
+                ),
+
+            "highTopOfPageBidMicros":
+                (
+                    metrics
+                    .high_top_of_page_bid_micros
+                )
+        }
+
+    # -----------------------------------------------------
+    # 4. Merge + score
+    # -----------------------------------------------------
+
+    rows = []
+
+    for item in candidates:
+
+        query_key = (
+            item["query"]
+            .replace(" ", "")
+            .lower()
+        )
+
+        ads_data = (
+            ads_map.get(
+                query_key,
+                {}
+            )
+        )
+
+        avg_monthly_searches = (
+            ads_data.get(
+                "avgMonthlySearches",
+                0
+            )
+            or 0
+        )
+
+        competition = (
+            ads_data.get(
+                "competition",
+                "UNSPECIFIED"
+            )
+        )
+
+        competition_index = (
+            ads_data.get(
+                "competitionIndex",
+                0
+            )
+            or 0
+        )
+
+        low_bid = (
+            ads_data.get(
+                "lowTopOfPageBidMicros",
+                0
+            )
+            or 0
+        )
+
+        high_bid = (
+            ads_data.get(
+                "highTopOfPageBidMicros",
+                0
+            )
+            or 0
+        )
+
+        position_factor = max(
+            req.maxPosition
+            - item["position"]
+            + 1,
+            1
+        )
+
+        ctr_gap = max(
+            req.maxCtr
+            - item["ctr"],
+            0
+        )
+
+        volume_factor = max(
+            avg_monthly_searches,
+            1
+        )
+
+        opportunity_score = round(
+            (
+                item["impressions"]
+                * ctr_gap
+                * position_factor
+                * volume_factor
+            )
+            / 100,
+            2
+        )
+
+        rows.append(
+            {
+                "query":
+                    item["query"],
+
+                "page":
+                    item["page"],
+
+                "clicks":
+                    item["clicks"],
+
+                "impressions":
+                    item["impressions"],
+
+                "ctr":
+                    item["ctr"],
+
+                "position":
+                    item["position"],
+
+                "avgMonthlySearches":
+                    avg_monthly_searches,
+
+                "competition":
+                    competition,
+
+                "competitionIndex":
+                    competition_index,
+
+                "lowTopOfPageBidMicros":
+                    low_bid,
+
+                "highTopOfPageBidMicros":
+                    high_bid,
+
+                "opportunityScore":
+                    opportunity_score
+            }
+        )
+
+    rows.sort(
+        key=lambda x:
+            x["opportunityScore"],
+        reverse=True
+    )
+
+    return {
+        "filters": {
+            "minImpressions":
+                req.minImpressions,
+
+            "minPosition":
+                req.minPosition,
+
+            "maxPosition":
+                req.maxPosition,
+
+            "maxCtr":
+                req.maxCtr
+        },
+
+        "count":
+            len(rows),
+
+        "rows":
+            rows
+    }
 
 # =========================================================
 # Search Console: Query Filter
