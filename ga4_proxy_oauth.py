@@ -7240,3 +7240,9 @@ def acquisition_opportunity_summary(
                 f"{str(e)}"
             )
         )
+
+
+# The MCP transport is mounted only after all HTTP report routes are registered.
+from mcp_bridge import install_mcp
+
+install_mcp(app)
