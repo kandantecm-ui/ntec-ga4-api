@@ -29,8 +29,10 @@ REPORTS = {
     "getExitPagesReport": "/api/ga4/page/exits",
     "getColumnRankingReport": "/api/ga4/column/ranking",
     "getPageFlow": "/api/ga4/page/flow",
+    "getPageFlowReport": "/api/ga4/page/flow",  # Name used in the existing manual.
     "getPageFlowFromPage": "/api/ga4/page/flow/from-page",
     "getPreviousPage": "/api/ga4/page/before-page",
+    "getPreviousPageReport": "/api/ga4/page/before-page",  # Manual alias.
     "getUsersByPage": "/api/bq/page/users",
     "getUserPathsByTarget": "/api/bq/user/path",
     "getUserJourney": "/api/bq/user/journey",
@@ -68,10 +70,14 @@ def install_mcp(app: FastAPI) -> None:
     for name, path in REPORTS.items():
         route = api_routes[path]
         method = "GET" if "GET" in route.methods else "POST"
+        model = route.body_field.field_info.annotation if route.body_field else None
+        fields = model.model_fields if model and hasattr(model, "model_fields") else {}
+        required = [key for key, field in fields.items() if field.is_required()]
         description = (
             f"Read the NTEC analytics report at {path}. "
-            "params contains its existing API JSON request fields; "
-            f"see /openapi.json for the {route.name} request schema."
+            f"Pass the existing API JSON fields in params. Required: {', '.join(required) or 'none'}. "
+            f"Accepted: {', '.join(fields) or 'none'}. "
+            f"See /openapi.json for the {route.name} request schema."
         )
 
         def register(report_name: str, report_path: str, report_method: str, doc: str) -> None:
