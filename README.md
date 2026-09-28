@@ -15,12 +15,14 @@ The new Python dependency is pinned as `mcp==2.2.0`. Render's build must install
 | Surface | Current request authentication | Effect of this PR |
 | --- | --- | --- |
 | Existing GPT Actions `/api/...` | None, as configured in the GPT | No change |
-| New `/mcp/` endpoint | None | 28 read-only report tools; same service-account-backed data as `/api/...` |
+| New `/mcp/` endpoint | None | 28 read-only reports, plus two names retained as manual aliases; same service-account-backed data as `/api/...` |
 | Google APIs | Render service account and Ads credentials | No change |
 
 The MCP connection can be configured with **no authentication**, matching the existing GPT Action. This is a public endpoint: anyone who knows the URL can request analytics and anonymous BigQuery user paths. A custom app's visibility setting does not protect the web endpoint. For private access, plan an OAuth-protected MCP connection and review protection of the existing `/api/...` Action separately. Do not put Google credentials or a static secret in this repository or in an MCP URL. No OAuth or bearer-token flow is implied by the Google service account; it authenticates the server **to Google**, not callers **to this server**.
 
 The general analysis tool is `getAcquisitionOpportunitySummary`. With no dates it uses the 30 complete days ending yesterday in Japan time. Other tools take `params` with the same JSON fields as the corresponding `/api/...` request model; their path is in each tool's description, and `/openapi.json` describes the fields. MCP is read-only and returns the existing route's JSON, including validation errors with their HTTP status.
+
+The manual names `getPageFlowReport` and `getPreviousPageReport`; both are available alongside the shorter `getPageFlow` and `getPreviousPage` tool names. Each pair uses the same underlying report.
 
 ## Local check
 

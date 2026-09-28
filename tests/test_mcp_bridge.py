@@ -22,8 +22,13 @@ class MCPBridgeTest(unittest.TestCase):
                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
             )
             self.assertEqual(response.status_code, 200)
-            names = {tool["name"] for tool in response.json()["result"]["tools"]}
+            tools = response.json()["result"]["tools"]
+            names = {tool["name"] for tool in tools}
             self.assertEqual(names, set(REPORTS))
+            descriptions = {tool["name"]: tool["description"] for tool in tools}
+            self.assertIn("Required: targetPage", descriptions["getConversionPrePages"])
+            self.assertIn("getPageFlowReport", names)
+            self.assertIn("getPreviousPageReport", names)
 
             # The MCP tool runs the real API validation; no Google call is made.
             response = client.post(
