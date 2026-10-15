@@ -1648,6 +1648,17 @@ class KeywordSearchVolumeRequest(
         "geoTargetConstants/20636"
     )
 
+    startMonth: Optional[str] = Field(
+        default=None,
+        pattern=r"^[1-9][0-9]{3}-(0[1-9]|1[0-2])$",
+        description="First month, inclusive (YYYY-MM). Supply with endMonth."
+    )
+    endMonth: Optional[str] = Field(
+        default=None,
+        pattern=r"^[1-9][0-9]{3}-(0[1-9]|1[0-2])$",
+        description="Last month, inclusive (YYYY-MM). Omit both for the default past 12 months."
+    )
+
 
 # =========================================================
 # BigQuery Request Models
@@ -1981,6 +1992,17 @@ def keyword_search_volume(
     req: KeywordSearchVolumeRequest
 ):
 
+    if (req.startMonth is None) != (req.endMonth is None):
+        raise HTTPException(
+            status_code=422,
+            detail="startMonth and endMonth must be supplied together."
+        )
+    if req.startMonth and req.startMonth > req.endMonth:
+        raise HTTPException(
+            status_code=422,
+            detail="startMonth must not be after endMonth."
+        )
+
     try:
         client = (
             get_google_ads_client()
@@ -2021,6 +2043,23 @@ def keyword_search_volume(
             .KeywordPlanNetworkEnum
             .GOOGLE_SEARCH
         )
+
+        if req.startMonth is not None:
+            month_names = (
+                "JANUARY", "FEBRUARY", "MARCH", "APRIL",
+                "MAY", "JUNE", "JULY", "AUGUST",
+                "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+            )
+            month_range = request.historical_metrics_options.year_month_range
+            for boundary, value in (
+                (month_range.start, req.startMonth),
+                (month_range.end, req.endMonth),
+            ):
+                year, month = map(int, value.split("-"))
+                boundary.year = year
+                boundary.month = getattr(
+                    client.enums.MonthOfYearEnum, month_names[month - 1]
+                )
 
         response = (
             service
